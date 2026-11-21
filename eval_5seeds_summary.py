@@ -12,6 +12,16 @@ con t-Student (CI95) y contrasta contra la línea base histórica.
 """
 
 import os
+import sys
+
+# Desambiguar paquete local 'trace' frente al módulo 'trace' de la biblioteca estándar de Python
+if "trace" in sys.modules and not hasattr(sys.modules["trace"], "__path__"):
+    del sys.modules["trace"]
+
+current_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else os.getcwd()
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
 import json
 import time
 import numpy as np
