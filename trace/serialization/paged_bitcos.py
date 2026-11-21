@@ -344,8 +344,6 @@ class PagedBitCOSReader:
                     module.int8_codes.copy_(full_codes)
                     module.packed_scale.fill_(scale_val)
                     module.cached_w_eff = full_codes.to(torch.float32) * scale_val
-                    module.cached_pos_mask = (full_codes == 1).to(torch.float32)
-                    module.cached_neg_mask = (full_codes == -1).to(torch.float32)
                     module.weight.data.copy_(module.cached_w_eff)
                     module.use_loaded_bitcos = True
                     loaded_bitlinear += 1

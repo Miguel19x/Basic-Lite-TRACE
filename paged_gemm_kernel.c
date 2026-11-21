@@ -33,6 +33,9 @@ void paged_direct_matmul_fast_c(
     int64_t K
 ) {
     const PagedHeader* hdr = (const PagedHeader*)page_blob;
+    if (hdr->fmt_code != 1) {
+        return; // Solo admite fast format (fmt_code == 1)
+    }
     const uint32_t rows = hdr->rows;
     const uint16_t cols = hdr->cols;
     const uint8_t* payload = page_blob + sizeof(PagedHeader);
@@ -238,6 +241,12 @@ void paged_lowrank_matmul_row_c(
                  + (int32_t)x[k + 1] * (((int32_t)((b >> 2) & 0x03)) - 1)
                  + (int32_t)x[k + 2] * (((int32_t)((b >> 4) & 0x03)) - 1)
                  + (int32_t)x[k + 3] * (((int32_t)((b >> 6) & 0x03)) - 1);
+        }
+        for (; k < K; ++k) {
+            uint8_t byte_val = row_w[k >> 2];
+            int shift = (k & 3) * 2;
+            int32_t w = ((int32_t)((byte_val >> shift) & 0x03)) - 1;
+            acc += (int32_t)x[k] * w;
         }
         out[r] = acc;
     }

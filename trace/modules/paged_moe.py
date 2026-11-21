@@ -98,7 +98,7 @@ class MemoryAwarePagedMoE(nn.Module):
             dynamic_factor = self.capacity_factor * (1.25 - 0.50 * mean_t)
             k = max(1, min(B_blk, int(round((B_blk * dynamic_factor) / self.num_experts))))
 
-        x_blk = x.view(num_total_blocks, B_blk, D)
+        x_blk = x.reshape(num_total_blocks, B_blk, D)
         router_logits = self.router(x_blk)
         raw_scores = F.softmax(router_logits, dim=-1)  # [num_total_blocks, B_blk, E]
 
@@ -118,12 +118,12 @@ class MemoryAwarePagedMoE(nn.Module):
             scores = raw_scores
 
         if active_mask is not None:
-            act_blk = active_mask.view(num_total_blocks, B_blk, 1)
+            act_blk = active_mask.reshape(num_total_blocks, B_blk, 1)
             scores = scores * (0.10 + 0.90 * act_blk)
             scores = scores * (act_blk > 0.05).float()
 
         if non_pad_mask is not None:
-            valid_blk = non_pad_mask.view(num_total_blocks, B_blk, 1).float()
+            valid_blk = non_pad_mask.reshape(num_total_blocks, B_blk, 1).float()
             scores = scores * valid_blk
 
         curr_node_ids = scores.argmax(dim=-1).detach()
@@ -178,7 +178,7 @@ class MemoryAwarePagedMoE(nn.Module):
                 out_flat.index_add_(0, token_indices, expert_out)
 
         self.last_selected_experts = list(active_experts_in_step)
-        return (out_flat.view(B, L, D) + shared_out), curr_node_ids
+        return (out_flat.reshape(B, L, D) + shared_out), curr_node_ids
 
     def get_last_telemetry(self) -> Dict[str, Any]:
         sel = getattr(self, "last_selected_experts", [])

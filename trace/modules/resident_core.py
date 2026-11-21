@@ -71,6 +71,7 @@ class SharedResidentTernaryCore(nn.Module):
         record_telemetry: bool = False,
         integer_mode: bool = False,
         add_sub_mode: bool = False,
+        attn_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if t_noise.dim() == 1:
             noise_pair = torch.stack([t_noise, delta_t], dim=-1)
@@ -104,6 +105,7 @@ class SharedResidentTernaryCore(nn.Module):
                 record_telemetry=record_telemetry,
                 integer_mode=integer_mode,
                 add_sub_mode=add_sub_mode,
+                attn_mask=attn_mask,
             )
         else:
             attn_out, updated_latent_kv = self.attn(
@@ -113,6 +115,7 @@ class SharedResidentTernaryCore(nn.Module):
                 record_telemetry=record_telemetry,
                 integer_mode=integer_mode,
                 add_sub_mode=add_sub_mode,
+                attn_mask=attn_mask,
             )
         eff_alpha = self.alpha_z * step_scale
         eff_beta = self.beta_y * step_scale

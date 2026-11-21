@@ -74,6 +74,7 @@ class MultiHeadLatentAttention(nn.Module):
         record_telemetry: bool = False,
         integer_mode: bool = False,
         add_sub_mode: bool = False,
+        attn_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Calcula la atención retornando la salida y la caché KV comprimida en dimensión d_c.
@@ -111,8 +112,8 @@ class MultiHeadLatentAttention(nn.Module):
         if latent_kv_cache is not None:
             attn_out = F.scaled_dot_product_attention(q, k_full, v_full, is_causal=False)
         else:
-            attn_mask = self._get_block_mask(L, x.device)
-            attn_out = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=attn_mask)
+            eff_mask = attn_mask if attn_mask is not None else self._get_block_mask(L, x.device)
+            attn_out = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=eff_mask)
 
         attn_out = attn_out.transpose(1, 2).contiguous().view(B, L, D)
         out = self.o_proj(attn_out, record_telemetry, integer_mode, add_sub_mode)
