@@ -4,8 +4,8 @@
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
 from trace.serialization.paged_bitcos import (
-    PagedBitCOSSerializer,
     PagedBitCOSReader,
+    PagedBitCOSSerializer,
 )
 
 __all__ = [

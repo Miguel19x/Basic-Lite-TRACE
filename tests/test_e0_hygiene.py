@@ -5,10 +5,11 @@ Suite de Higiene y Contratos E0 para TRACECausalModel:
 - E0.3 Independencia Estricta de Lote: los logits de una muestra aislada coinciden
   exactamente (diff <= 1e-5) cuando la muestra se procesa dentro de un lote heterogéneo.
 """
-import torch
-import torch.nn as nn
-from config import HybridConfig
 from trace.models.causal import TRACECausalModel
+
+import torch
+
+from config import HybridConfig
 from data import ProceduralCompositionalDataset
 from train import collate_fn
 

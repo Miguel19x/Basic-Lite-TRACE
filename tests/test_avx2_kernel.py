@@ -6,11 +6,11 @@ Test de paridad y exactitud numérica estricta en int32 (diff == 0) para el kern
 4. Valida ternary_addsub_cpu_kernel (ruta densa int8 con vpsignb).
 Cubre M in {1, 4, 8}, K in {32, 50, 96, 192, 384}, extremos [-127, 127] y casos borde.
 """
-import os
 import ctypes
-import numpy as np
-
+import os
 from trace.serialization.paged_bitcos import PagedBitCOSSerializer
+
+import numpy as np
 
 
 def load_kernel_lib():

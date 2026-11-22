@@ -4,14 +4,15 @@
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
 import time
-from typing import Dict, Any, List, Tuple
-import torch
-from config import HybridConfig
-from data import ProceduralCompositionalDataset, parse_fixed_scratchpad
 from trace.models.causal import TRACECausalModel
+from typing import Any
+
+import torch
+
+from data import ProceduralCompositionalDataset, parse_fixed_scratchpad
 
 
-def compute_ece(confidences: List[float], correctness: List[float], num_bins: int = 10) -> float:
+def compute_ece(confidences: list[float], correctness: list[float], num_bins: int = 10) -> float:
     """Calcula Expected Calibration Error (ECE) ponderado en porcentaje."""
     if not confidences or len(confidences) != len(correctness):
         return 0.0
@@ -33,7 +34,7 @@ def evaluate_causal(
     model: TRACECausalModel,
     dataset: ProceduralCompositionalDataset,
     device: torch.device,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Evaluación rigurosa del modelo TRACE Causal (Basic-Lite TRACE) bajo inferencia de 2 pasos.
     Calcula Exact Match Total, Scratchpad EM, Final EM, Exactitud de Dígitos,
@@ -50,10 +51,10 @@ def evaluate_causal(
     matching_digits = 0
     total_time_ms = 0.0
 
-    all_confidences: List[float] = []
-    all_correctness: List[float] = []
-    s2_confidences: List[float] = []
-    s2_correctness: List[float] = []
+    all_confidences: list[float] = []
+    all_correctness: list[float] = []
+    s2_confidences: list[float] = []
+    s2_correctness: list[float] = []
 
     samples = dataset.samples
 
@@ -98,7 +99,7 @@ def evaluate_causal(
             (31, 34), # ms (dígitos 9, 10, 11 - Etapa 2)
         ]
 
-        case_correctness: List[float] = []
+        case_correctness: list[float] = []
         for s_start, s_end in digit_indices:
             exp_sub = expected_target_str[s_start:s_end]
             pred_sub = gen_str[s_start:s_end] if len(gen_str) >= s_end else "???"

@@ -10,17 +10,17 @@ Incorpora Abacus Positional Embeddings, Desacoplamiento Causal (Subtotales -> To
 Schedule QAT de 2 Etapas (BitNet b1.58) y Telemetría de Saturación/Flips.
 """
 
-import os
-import time
 import argparse
 import math
+import os
 import random
-from typing import List, Optional, Tuple
+import time
+from trace.models.causal import TRACECausalModel
+
 import torch
 
 from config import HybridConfig
 from data import ProceduralCompositionalDataset
-from trace.models.causal import TRACECausalModel
 from eval import evaluate_causal
 
 
@@ -47,7 +47,7 @@ def train(
     device_name: str = "auto",
     eval_interval: int = 200,
     warmup_ratio: float = 0.40,
-    warmup_steps: Optional[int] = None,
+    warmup_steps: int | None = None,
     lr_warmup_steps: int = 300,
     use_bitnet_schedule: bool = False,
     lr_peak: float = 1.0e-3,

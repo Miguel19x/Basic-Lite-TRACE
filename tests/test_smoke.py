@@ -1,12 +1,13 @@
 """
 Test de humo para verificar compilación y carga del kernel C y el forward pass de TRACECausalModel.
 """
-import os
 import ctypes
+import os
+from trace.models.causal import TRACECausalModel
+
 import torch
 
 from config import HybridConfig
-from trace.models.causal import TRACECausalModel
 from data import ProceduralCompositionalDataset
 
 

@@ -11,8 +11,7 @@ Garantiza paridad bit a bit con el motor nativo en C (csrc/lm/trace_tokenizer.c)
 import os
 import struct
 from collections import Counter
-from typing import List, Tuple, Dict, Iterator
-
+from collections.abc import Iterator
 
 VOCAB_SIZE = 4096
 SPECIAL_PAD = 256
@@ -40,7 +39,7 @@ def _classify_cp(cp: int) -> int:
     return 5  # CAT_OTHER
 
 
-def _decode_utf8_char(raw: bytes, offset: int) -> Tuple[int, int]:
+def _decode_utf8_char(raw: bytes, offset: int) -> tuple[int, int]:
     """Decodifica un punto de código UTF-8 y su longitud en bytes."""
     b0 = raw[offset]
     rem = len(raw) - offset
@@ -106,8 +105,8 @@ class TRACETokenizer:
     def __init__(self, bin_path: str = None):
         self.vocab_size = VOCAB_SIZE
         self.num_merges = NUM_MERGES
-        self.merges: Dict[Tuple[int, int], int] = {}
-        self.pieces: List[bytes] = [bytes([i]) for i in range(256)]
+        self.merges: dict[tuple[int, int], int] = {}
+        self.pieces: list[bytes] = [bytes([i]) for i in range(256)]
         self.pieces.extend([b"<PAD>", b"<MASK>", b"<BOS>", b"<EOS>"])
 
         if bin_path and os.path.exists(bin_path):
@@ -154,7 +153,7 @@ class TRACETokenizer:
     @classmethod
     def train(
         cls,
-        texts: List[str],
+        texts: list[str],
         target_vocab_size: int = VOCAB_SIZE,
         min_freq: int = 2
     ) -> "TRACETokenizer":
@@ -163,18 +162,18 @@ class TRACETokenizer:
         assert target_merges > 0, "target_vocab_size debe ser > 260"
 
         # 1. Pre-tokenizar todo el corpus y contar secuencias únicas
-        raw_counts: Dict[Tuple[int, ...], int] = Counter()
+        raw_counts: dict[tuple[int, ...], int] = Counter()
         for text in texts:
             for seg in pre_tokenize(text.encode("utf-8")):
                 if len(seg) > 1:
                     raw_counts[tuple(seg)] += 1
 
-        seq_list: List[List[int]] = [list(seq) for seq in raw_counts.keys()]
-        freq_list: List[int] = list(raw_counts.values())
+        seq_list: list[list[int]] = [list(seq) for seq in raw_counts.keys()]
+        freq_list: list[int] = list(raw_counts.values())
 
         # Mapa invertido: par -> set de índices de secuencias que lo contienen
-        pair_to_seqs: Dict[Tuple[int, int], set] = {}
-        pair_counts: Dict[Tuple[int, int], int] = Counter()
+        pair_to_seqs: dict[tuple[int, int], set] = {}
+        pair_counts: dict[tuple[int, int], int] = Counter()
 
         for s_idx, (seq, freq) in enumerate(zip(seq_list, freq_list)):
             for i in range(len(seq) - 1):
@@ -184,8 +183,8 @@ class TRACETokenizer:
                     pair_to_seqs[p] = set()
                 pair_to_seqs[p].add(s_idx)
 
-        merges_list: List[Tuple[int, int]] = []
-        pieces: List[bytes] = [bytes([i]) for i in range(256)]
+        merges_list: list[tuple[int, int]] = []
+        pieces: list[bytes] = [bytes([i]) for i in range(256)]
         pieces.extend([b"<PAD>", b"<MASK>", b"<BOS>", b"<EOS>"])
 
         # 2. Bucle determinista de fusiones con actualización incremental
@@ -255,7 +254,7 @@ class TRACETokenizer:
         tok.num_merges = len(merges_list)
         return tok
 
-    def _merge_segment(self, seg_bytes: bytes) -> List[int]:
+    def _merge_segment(self, seg_bytes: bytes) -> list[int]:
         if not seg_bytes:
             return []
         if len(seg_bytes) == 1:
@@ -284,14 +283,14 @@ class TRACETokenizer:
 
         return tokens
 
-    def encode(self, text: str) -> List[int]:
+    def encode(self, text: str) -> list[int]:
         raw = text.encode("utf-8")
-        out: List[int] = []
+        out: list[int] = []
         for seg in pre_tokenize(raw):
             out.extend(self._merge_segment(seg))
         return out
 
-    def decode(self, tokens: List[int]) -> str:
+    def decode(self, tokens: list[int]) -> str:
         out_bytes = bytearray()
         for t in tokens:
             if 0 <= t < len(self.pieces):

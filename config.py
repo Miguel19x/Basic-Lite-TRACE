@@ -4,7 +4,6 @@
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
 from dataclasses import dataclass
-from typing import Tuple
 
 
 @dataclass
@@ -77,8 +76,8 @@ class HybridConfig:
     dev_mode: bool = False
     val_samples_full: int = 384
     val_samples_dev: int = 64
-    eval_recursions_full: Tuple[int, ...] = (1, 2, 4)
-    eval_recursions_dev: Tuple[int, ...] = (2,)
+    eval_recursions_full: tuple[int, ...] = (1, 2, 4)
+    eval_recursions_dev: tuple[int, ...] = (2,)
 
     # Optimización AdamW
     batch_size: int = 16

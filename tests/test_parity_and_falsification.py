@@ -14,11 +14,12 @@ Suite de Paridad Numérica y Falsación Activa — Fase 2 (Hito 2.3):
 import copy
 import struct
 import tempfile
+from trace.layers.bitlinear import BitLinear
+from trace.models.causal import TRACECausalModel
+from trace.serialization.paged_bitcos import PagedBitCOSReader
+
 import torch
 
-from trace.models.causal import TRACECausalModel
-from trace.layers.bitlinear import BitLinear
-from trace.serialization.paged_bitcos import PagedBitCOSReader
 from data import ProceduralCompositionalDataset
 
 

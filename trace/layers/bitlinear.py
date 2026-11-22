@@ -4,14 +4,12 @@
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
 import math
-from typing import Dict, Optional, Tuple
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
 from trace.layers.norm import RMSNorm
 from trace.ops.ternary_cpu import ternary_addsub_matmul
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 class BitLinear(nn.Module):
@@ -45,10 +43,10 @@ class BitLinear(nn.Module):
         self.register_buffer("packed_scale", torch.tensor(1.0, dtype=torch.float32), persistent=False)
         self.register_buffer("cached_w_eff", torch.empty(0), persistent=False)
         self.register_buffer("prev_codes", torch.zeros(out_features, in_features, dtype=torch.int8), persistent=False)
-        self.last_stats: Dict[str, float] = {}
+        self.last_stats: dict[str, float] = {}
         self.use_loaded_bitcos: bool = False
 
-    def quantize_weights(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def quantize_weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         scale_w = self.weight.abs().mean().clamp(min=self.eps)
         q_w = torch.clamp(torch.round(self.weight / scale_w), -1.0, 1.0)
         w_eff = self.weight + (scale_w * q_w - self.weight).detach()

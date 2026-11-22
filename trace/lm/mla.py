@@ -10,17 +10,16 @@ y absorción completa de pesos (W_uk y W_uv) con soporte de caché INT8.
 """
 
 import math
-from typing import Optional, Tuple
+from trace.layers.bitlinear import BitLinear
+from trace.layers.norm import RMSNorm
+from trace.lm.config import TRACELMConfig
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from trace.layers.norm import RMSNorm
-from trace.layers.bitlinear import BitLinear
-from trace.lm.config import TRACELMConfig
 
-
-def precompute_rope_frequencies(dim: int, max_seq_len: int, theta: float = 10000.0) -> Tuple[torch.Tensor, torch.Tensor]:
+def precompute_rope_frequencies(dim: int, max_seq_len: int, theta: float = 10000.0) -> tuple[torch.Tensor, torch.Tensor]:
     """Precomputa cos y sin para codificación posicional rotacional desacoplada."""
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
     t = torch.arange(max_seq_len, dtype=torch.float32)
@@ -96,12 +95,12 @@ class MultiHeadLatentAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
-        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attn_mask: torch.Tensor | None = None,
+        kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
         use_weight_absorption: bool = False,
         quantize_kv_int8: bool = False,
         add_sub_mode: bool = False,
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         B, S, _ = x.shape
         past_len = kv_cache[0].shape[1] if kv_cache is not None else 0
 

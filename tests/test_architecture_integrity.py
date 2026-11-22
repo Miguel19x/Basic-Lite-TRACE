@@ -7,12 +7,14 @@ Verifica:
 4. MoE residente (MemoryAwarePagedMoE) con 4 expertos residentes + experto compartido.
 5. Inferencia forward pass en TRACECausalModel con 0 tensores FP32 en pesos BitLinear.
 """
-import torch
-from config import HybridConfig
-from trace.models.causal import TRACECausalModel
 from trace.layers.ffn import TernaryExpert
-from trace.modules.paged_moe import MemoryAwarePagedMoE
+from trace.models.causal import TRACECausalModel
 from trace.modules.attention import BlockCausalGQATernaryAttention
+from trace.modules.paged_moe import MemoryAwarePagedMoE
+
+import torch
+
+from config import HybridConfig
 
 
 def test_default_production_config():

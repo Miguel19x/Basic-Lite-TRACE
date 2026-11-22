@@ -3,12 +3,12 @@
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
-from typing import Any, Dict, List, Optional, Tuple
+from trace.layers.ffn import TernaryExpert
+from typing import Any
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from trace.layers.ffn import TernaryExpert
 
 
 class MemoryAwarePagedMoE(nn.Module):
@@ -40,19 +40,19 @@ class MemoryAwarePagedMoE(nn.Module):
         if self.use_shared_expert:
             self.shared_expert = TernaryExpert(cfg.d_model, cfg.d_ff_expert, eps=cfg.eps)
 
-        self.last_selected_experts: List[int] = []
+        self.last_selected_experts: list[int] = []
 
     def forward(
         self,
         x: torch.Tensor,
         t_noise: torch.Tensor,
-        non_pad_mask: Optional[torch.Tensor] = None,
-        active_mask: Optional[torch.Tensor] = None,
+        non_pad_mask: torch.Tensor | None = None,
+        active_mask: torch.Tensor | None = None,
         r_step: int = 0,
         record_telemetry: bool = False,
         integer_mode: bool = False,
         add_sub_mode: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         B, L, D = x.shape
         shared_out = 0.0
         if self.use_shared_expert:
@@ -116,7 +116,7 @@ class MemoryAwarePagedMoE(nn.Module):
         self.last_selected_experts = list(active_experts_in_step)
         return (out_flat.reshape(B, L, D) + shared_out), curr_node_ids
 
-    def get_last_telemetry(self) -> Dict[str, Any]:
+    def get_last_telemetry(self) -> dict[str, Any]:
         sel = getattr(self, "last_selected_experts", [])
         return {
             "selected_experts": sel,

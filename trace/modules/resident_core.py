@@ -3,16 +3,15 @@
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
-from typing import Any, Dict, List, Optional, Tuple
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
 from trace.layers.bitlinear import BitLinear
 from trace.layers.embeddings import SinusoidalStepEncoding
 from trace.layers.norm import RMSNorm
 from trace.modules.attention import BlockCausalGQATernaryAttention
 from trace.modules.paged_moe import MemoryAwarePagedMoE
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 class SharedResidentTernaryCore(nn.Module):
@@ -58,15 +57,15 @@ class SharedResidentTernaryCore(nn.Module):
         delta_t: torch.Tensor,
         r_step: int,
         total_recursions: int,
-        non_pad_mask: Optional[torch.Tensor],
+        non_pad_mask: torch.Tensor | None,
         active_mask: torch.Tensor,
-        latent_kv_cache: Optional[torch.Tensor] = None,
+        latent_kv_cache: torch.Tensor | None = None,
         start_pos: int = 0,
         record_telemetry: bool = False,
         integer_mode: bool = False,
         add_sub_mode: bool = False,
-        attn_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        attn_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if t_noise.dim() == 1:
             noise_pair = torch.stack([t_noise, delta_t], dim=-1)
             e_t = self.noise_mlp(noise_pair).unsqueeze(1)

@@ -3,7 +3,7 @@
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
-from typing import Optional
+
 import torch
 import torch.nn as nn
 
@@ -12,7 +12,7 @@ def extract_abacus_ranks(
     input_ids: torch.Tensor,
     delimiter_rank: int = 15,
     max_rank: int = 14,
-    mask_token_id: Optional[int] = 257,
+    mask_token_id: int | None = 257,
 ) -> torch.Tensor:
     """
     Calcula de forma 100% vectorizada en PyTorch los rangos decimales relativos
@@ -61,7 +61,7 @@ class AbacusEmbedding(nn.Module):
         d_model: int,
         max_ranks: int = 16,
         delimiter_rank: int = 15,
-        mask_token_id: Optional[int] = 257,
+        mask_token_id: int | None = 257,
     ):
         super().__init__()
         self.d_model = d_model

@@ -4,7 +4,8 @@
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
 import sqlite3
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
+
 import torch
 
 
@@ -32,11 +33,11 @@ class HierarchicalContextManager:
         self.enable_sqlite_context_l3 = enable_sqlite_context_l3
 
         # Nivel 1: Buffer Activo en RAM
-        self.active_token_ids: List[int] = []
-        self.active_latent_kv: Optional[torch.Tensor] = None
+        self.active_token_ids: list[int] = []
+        self.active_latent_kv: torch.Tensor | None = None
 
         # Nivel 2: Segmentos Comprimidos Latentes en RAM
-        self.compressed_segments: List[Dict[str, Any]] = []
+        self.compressed_segments: list[dict[str, Any]] = []
 
         # Nivel 3: Archivo Persistente (Base de datos SQLite indexada con FTS5 - Modo 30B)
         if self.enable_sqlite_context_l3:
@@ -78,9 +79,9 @@ class HierarchicalContextManager:
 
     def ingest_tokens(
         self,
-        new_token_ids: List[int],
-        latent_features: Optional[torch.Tensor] = None,
-    ) -> Dict[str, Any]:
+        new_token_ids: list[int],
+        latent_features: torch.Tensor | None = None,
+    ) -> dict[str, Any]:
         """
         Ingesta nuevos tokens en el sistema jerárquico.
         Si la ventana activa supera active_window_size, desplaza los tokens antiguos
@@ -147,7 +148,7 @@ class HierarchicalContextManager:
             "total_ingested": self.total_tokens_ingested,
         }
 
-    def retrieve_exact_fact(self, query: str, top_k: int = 2) -> List[Dict[str, Any]]:
+    def retrieve_exact_fact(self, query: str, top_k: int = 2) -> list[dict[str, Any]]:
         """
         Recupera fragmentos originales del Nivel 3 (Archivo) basados en coincidencias
         de palabras clave o términos específicos mediante SQLite FTS5 (con fallback LIKE).
@@ -236,7 +237,7 @@ class HierarchicalContextManager:
 
         return results[:top_k]
 
-    def inject_retrieved_to_active(self, chunks: Union[Dict[str, Any], List[Dict[str, Any]]]) -> None:
+    def inject_retrieved_to_active(self, chunks: dict[str, Any] | list[dict[str, Any]]) -> None:
         """
         Inserta fragmentos exactos recuperados desde el Archivo hacia la atención activa
         para que el modelo pueda resolver la pregunta con datos no alucinados.
@@ -250,7 +251,7 @@ class HierarchicalContextManager:
             all_tokens.extend([b for b in raw_text.encode("utf-8")])
         self.active_token_ids = all_tokens + self.active_token_ids
 
-    def get_telemetry(self) -> Dict[str, Any]:
+    def get_telemetry(self) -> dict[str, Any]:
         """Reporta telemetría de memoria y recuperación contextual de forma segura."""
         if self.conn is not None:
             cursor = self.conn.cursor()

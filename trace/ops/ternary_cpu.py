@@ -3,19 +3,18 @@
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
-import os
-import sys
 import ctypes
 import subprocess
+import sys
 from pathlib import Path
-from typing import Optional
+
 import torch
 
-_LIB_INSTANCE: Optional[ctypes.CDLL] = None
-_KERNEL_AVAILABLE: Optional[bool] = None
+_LIB_INSTANCE: ctypes.CDLL | None = None
+_KERNEL_AVAILABLE: bool | None = None
 
 
-def compile_and_load_ternary_kernel() -> Optional[ctypes.CDLL]:
+def compile_and_load_ternary_kernel() -> ctypes.CDLL | None:
     global _LIB_INSTANCE, _KERNEL_AVAILABLE
     if _LIB_INSTANCE is not None:
         return _LIB_INSTANCE

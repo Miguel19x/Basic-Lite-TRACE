@@ -4,10 +4,9 @@
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
 import ctypes
-import os
-from pathlib import Path
 import subprocess
-from typing import List, Tuple
+from pathlib import Path
+
 import torch
 
 _LIB_PAGED_INSTANCE = None
@@ -79,7 +78,7 @@ def get_paged_c_lib() -> ctypes.CDLL:
 def paged_direct_block_matmul_fast_c(
     q_x_int8: torch.Tensor,
     page_bytes: bytes,
-) -> Tuple[int, int, float, torch.Tensor]:
+) -> tuple[int, int, float, torch.Tensor]:
     """
     Ejecución fisionada C de multiplicación de una página individual (formato 'fast').
     """
@@ -113,7 +112,7 @@ def paged_direct_block_matmul_fast_c(
 
 def paged_direct_matmul_fast_c_multi(
     q_x_int8: torch.Tensor,
-    pages_list: List[bytes],
+    pages_list: list[bytes],
     total_out_features: int,
 ) -> torch.Tensor:
     """

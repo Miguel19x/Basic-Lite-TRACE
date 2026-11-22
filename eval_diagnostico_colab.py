@@ -13,9 +13,13 @@ Implementa:
 - Exportación formal a eval_fase2b_unblock_5semillas_results.json con bootstrap percentil.
 """
 
-import os, sys, json, random
-import numpy as np
+import json
+import os
+import random
+import sys
 from collections import Counter, defaultdict
+
+import numpy as np
 
 if "/content/Basic-Lite-TRACE" not in sys.path:
     sys.path.insert(0, "/content/Basic-Lite-TRACE")
@@ -26,10 +30,12 @@ if current_dir not in sys.path:
 if "trace" in sys.modules and not hasattr(sys.modules["trace"], "__path__"):
     del sys.modules["trace"]
 
+from trace.models.causal import TRACECausalModel
+
 import torch
+
 from config import HybridConfig
 from data import ProceduralCompositionalDataset, parse_fixed_scratchpad
-from trace.models.causal import TRACECausalModel
 from eval import evaluate_causal
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -176,15 +182,23 @@ if os.path.exists(ckpt_999_path):
                 for name, pred_v, exp_v in [("watt", w, exp_w), ("ms", ms, exp_ms)]:
                     if pred_v != exp_v:
                         ps, es = f"{pred_v:03d}", f"{exp_v:03d}"
-                        if ps[0] != es[0]: col_err[f"{name}_centenas"] += 1
-                        if ps[1] != es[1]: col_err[f"{name}_decenas"] += 1
-                        if ps[2] != es[2]: col_err[f"{name}_unidades"] += 1
+                        if ps[0] != es[0]:
+                            col_err[f"{name}_centenas"] += 1
+                        if ps[1] != es[1]:
+                            col_err[f"{name}_decenas"] += 1
+                        if ps[2] != es[2]:
+                            col_err[f"{name}_unidades"] += 1
                         d = abs(pred_v - exp_v)
-                        if d == 1: diff_bucket[f"{name}_±1"] += 1
-                        elif d == 10: diff_bucket[f"{name}_±10 (acarreo D)"] += 1
-                        elif d == 100: diff_bucket[f"{name}_±100 (acarreo C)"] += 1
-                        elif d % 10 == 0: diff_bucket[f"{name}_multiplo_10"] += 1
-                        else: diff_bucket[f"{name}_otro"] += 1
+                        if d == 1:
+                            diff_bucket[f"{name}_±1"] += 1
+                        elif d == 10:
+                            diff_bucket[f"{name}_±10 (acarreo D)"] += 1
+                        elif d == 100:
+                            diff_bucket[f"{name}_±100 (acarreo C)"] += 1
+                        elif d % 10 == 0:
+                            diff_bucket[f"{name}_multiplo_10"] += 1
+                        else:
+                            diff_bucket[f"{name}_otro"] += 1
 
     print("\n" + "=" * 92)
     print(f"RADIOGRAFÍA DE LOS {total_err} FALLOS — SEMILLA 999 (TEST-COMPOSICIONAL, N=480)")

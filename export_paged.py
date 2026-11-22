@@ -11,15 +11,15 @@ Alinea filas en formato Fast a múltiplos de 32 pesos (1 vector AVX2).
 Audita y certifica la condición de '0 pesos FP32 en RAM' para BitLinear.
 """
 
-import os
 import argparse
 import hashlib
+import os
+from trace.layers.bitlinear import BitLinear
+from trace.models.causal import TRACECausalModel
+from trace.serialization.paged_bitcos import PagedBitCOSReader, PagedBitCOSSerializer
+
 import torch
 import torch.nn as nn
-
-from trace.models.causal import TRACECausalModel
-from trace.layers.bitlinear import BitLinear
-from trace.serialization.paged_bitcos import PagedBitCOSSerializer, PagedBitCOSReader
 
 
 def compute_sha256(filepath: str) -> str:

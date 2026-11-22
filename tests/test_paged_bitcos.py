@@ -6,15 +6,16 @@ Test de verificación para Paged BitCOS v1 (Hito 2.1):
 """
 import os
 import tempfile
+from trace.layers.bitlinear import BitLinear
+from trace.models.causal import TRACECausalModel
+from trace.ops.paged_kernel import unpack_page_to_dense
+from trace.serialization.paged_bitcos import PagedBitCOSReader, PagedBitCOSSerializer
+
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
 
 from config import HybridConfig
-from trace.models.causal import TRACECausalModel
-from trace.layers.bitlinear import BitLinear
-from trace.serialization.paged_bitcos import PagedBitCOSSerializer, PagedBitCOSReader
-from trace.ops.paged_kernel import unpack_page_to_dense
 
 
 def count_fp32_weights_in_bitlinear(model: nn.Module) -> int:

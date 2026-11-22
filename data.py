@@ -3,12 +3,12 @@
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
-import hashlib
 import random
 import re
-from typing import Dict, List, Optional, Set, Tuple
+
 import torch
 from torch.utils.data import Dataset
+
 from config import HybridConfig
 
 
@@ -80,7 +80,7 @@ class ProceduralCompositionalDataset(Dataset):
         ("turbo", "saturada"),
     }
 
-    def __init__(self, cfg: HybridConfig, split: str = "train", num_samples: Optional[int] = None):
+    def __init__(self, cfg: HybridConfig, split: str = "train", num_samples: int | None = None):
         super().__init__()
         self.cfg = cfg
         self.split = split
@@ -89,7 +89,7 @@ class ProceduralCompositionalDataset(Dataset):
         comp_pool = []
         remaining_pool = []
 
-        self.record_meta: Dict[Tuple[bytes, bytes], Tuple[int, int, int, int]] = {}
+        self.record_meta: dict[tuple[bytes, bytes], tuple[int, int, int, int]] = {}
 
         for n_name, b_w, b_ms in self.NODOS:
             for c_name, m_w, m_ms in self.CARGAS:
@@ -166,7 +166,7 @@ class ProceduralCompositionalDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         prompt_b, target_b, _, _ = self.samples[idx]
         raw_len = 1 + len(prompt_b) + len(target_b) + 1
         assert raw_len <= self.cfg.max_seq_len, (
@@ -197,7 +197,7 @@ _WATT_MS_FIXED_RE = re.compile(r"watt:\s*(\d{3})\s*\nms:\s*(\d{3})")
 _SCRATCHPAD_FIXED_RE = re.compile(r"pw:\s*(\d{3})\s*\npms:\s*(\d{3})\s*\nwatt:\s*(\d{3})\s*\nms:\s*(\d{3})")
 
 
-def parse_fixed_prediction(text: str) -> Tuple[bool, Optional[int], Optional[int]]:
+def parse_fixed_prediction(text: str) -> tuple[bool, int | None, int | None]:
     """Analizador estricto para salidas de ancho fijo (3 dígitos obligatorios)."""
     m = _WATT_MS_FIXED_RE.search(text)
     if m:
@@ -208,7 +208,7 @@ def parse_fixed_prediction(text: str) -> Tuple[bool, Optional[int], Optional[int
     return False, None, None
 
 
-def parse_fixed_scratchpad(text: str) -> Tuple[bool, Optional[int], Optional[int], Optional[int], Optional[int]]:
+def parse_fixed_scratchpad(text: str) -> tuple[bool, int | None, int | None, int | None, int | None]:
     """Analizador estricto para salidas completas con scratchpad de ancho fijo."""
     m = _SCRATCHPAD_FIXED_RE.search(text)
     if m:

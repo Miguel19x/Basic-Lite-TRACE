@@ -4,16 +4,16 @@
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
 import random
-from typing import Any, Dict, List, Optional, Tuple
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
 from trace.layers.abacus import AbacusEmbedding
 from trace.layers.bitlinear import BitLinear
 from trace.layers.norm import RMSNorm
 from trace.modules.attention import build_target_unified_mask
 from trace.modules.resident_core import SharedResidentTernaryCore
+from typing import Any
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 class TRACECausalModel(nn.Module):
@@ -53,7 +53,7 @@ class TRACECausalModel(nn.Module):
         self.final_norm = RMSNorm(cfg.d_model, eps=cfg.eps)
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
 
-    def configure_adamw_groups(self, bitlinear_weight_decay: float = 0.0) -> List[Dict]:
+    def configure_adamw_groups(self, bitlinear_weight_decay: float = 0.0) -> list[dict]:
         """
         Configuración de decaimiento desacoplado en 3 grupos (BitNet b1.58):
         1. dense_decay: matrices densas FP32 (ej. lm_head) con weight_decay estándar.
@@ -99,10 +99,10 @@ class TRACECausalModel(nn.Module):
         self,
         x_t: torch.Tensor,
         t_noise: torch.Tensor,
-        num_recursions: Optional[int] = None,
+        num_recursions: int | None = None,
         stage_id: int = 0,
-        attn_mask: Optional[torch.Tensor] = None,
-        eval_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
+        eval_mask: torch.Tensor | None = None,
         record_telemetry: bool = False,
     ) -> torch.Tensor:
         """
@@ -176,11 +176,11 @@ class TRACECausalModel(nn.Module):
     def forward_two_stage(
         self,
         x_0: torch.Tensor,
-        prompt_lens: List[int],
+        prompt_lens: list[int],
         t_noise: torch.Tensor,
         scheduled_sampling_p: float = 0.85,
         record_telemetry: bool = False,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         """
         Paso hacia adelante de 2 etapas para entrenamiento conjunto.
         
@@ -362,8 +362,8 @@ class TRACECausalModel(nn.Module):
     def generate_causal_two_step(
         self,
         prompt_bytes: bytes,
-        override_scratchpad_tokens: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> Tuple[str, Dict[str, Any]]:
+        override_scratchpad_tokens: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         """
         Inferencia Causal Determinista por Columnas Decimales (Zero Exposure Bias):
         1. Emite subtotales Pw, Pms (o utiliza override_scratchpad_tokens para auditoría causal).

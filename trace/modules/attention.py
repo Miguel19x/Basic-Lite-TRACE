@@ -3,14 +3,13 @@
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
-from typing import Dict, List, Optional, Tuple
+from trace.layers.bitlinear import BitLinear
+from trace.layers.norm import RMSNorm
+from trace.layers.rotary import RotaryEmbedding
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from trace.layers.norm import RMSNorm
-from trace.layers.rotary import RotaryEmbedding
-from trace.layers.bitlinear import BitLinear
 
 
 def build_block_causal_mask(seq_len: int, block_size: int, device: torch.device) -> torch.Tensor:
@@ -22,7 +21,7 @@ def build_block_causal_mask(seq_len: int, block_size: int, device: torch.device)
 
 
 def build_target_unified_mask(
-    prompt_lens: List[int],
+    prompt_lens: list[int],
     max_seq_len: int,
     block_size: int,
     device: torch.device,
@@ -80,7 +79,7 @@ class BlockCausalGQATernaryAttention(nn.Module):
         if self.use_qk_norm:
             self.q_norm = RMSNorm(self.head_dim, eps=cfg.eps)
             self.k_norm = RMSNorm(self.head_dim, eps=cfg.eps)
-        self._mask_cache: Dict[Tuple[int, torch.device], torch.Tensor] = {}
+        self._mask_cache: dict[tuple[int, torch.device], torch.Tensor] = {}
 
     def _get_block_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         key = (seq_len, device)
@@ -101,13 +100,13 @@ class BlockCausalGQATernaryAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
         start_pos: int = 0,
         record_telemetry: bool = False,
         integer_mode: bool = False,
         add_sub_mode: bool = False,
-        attn_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        attn_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         B, L, D = x.shape
         q = self.q_proj(x, record_telemetry, integer_mode, add_sub_mode).view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x, record_telemetry, integer_mode, add_sub_mode).view(B, L, self.n_kv_heads, self.head_dim).transpose(1, 2)

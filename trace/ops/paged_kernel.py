@@ -5,12 +5,13 @@
 
 import struct
 import time
-from typing import Any, Dict, Tuple
+from typing import Any
+
 import numpy as np
 import torch
 
 
-def unpack_page_to_dense(page_bytes: bytes) -> Tuple[int, int, int, float, torch.Tensor]:
+def unpack_page_to_dense(page_bytes: bytes) -> tuple[int, int, int, float, torch.Tensor]:
     """
     Decodifica una página binaria Paged BitCOS a un tensor denso int8 {-1, 0, +1}.
     Retorna: (row_start, rows, cols, scale_w, codes_tensor)
@@ -56,7 +57,7 @@ def unpack_page_to_dense(page_bytes: bytes) -> Tuple[int, int, int, float, torch
 def paged_direct_block_matmul(
     q_x_int8: torch.Tensor,
     page_bytes: bytes,
-) -> Tuple[int, int, float, torch.Tensor]:
+) -> tuple[int, int, float, torch.Tensor]:
     """
     Ejecuta la multiplicación de la página empaquetada contra activaciones INT8
     sin reconstruir todo el tensor en FP32.
@@ -85,7 +86,7 @@ def benchmark_packed_vs_dense(
     out_features: int = 384,
     page_size: int = 4096,
     num_runs: int = 50,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Compara de forma estricta:
     1. Reconstrucción completa en FP32 + GEMM convencional
@@ -100,7 +101,6 @@ def benchmark_packed_vs_dense(
     torch.manual_seed(42)
     raw_weights = torch.randint(-1, 2, (out_features, in_features), dtype=torch.int8)
     scale_w = 0.05
-    dense_w_fp32 = raw_weights.to(torch.float32) * scale_w
 
     # Generar activaciones de prueba
     x_fp32 = torch.randn(batch_size, in_features)
@@ -185,7 +185,7 @@ def verify_integer_accumulators_exact_equality(
     in_features: int = 192,
     batch_size: int = 4,
     page_size: int = 4096,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Verifica la corrección de implementación estricta (Punto 2.A del Auditor):
     Compara los acumuladores enteros INT32 ANTES de aplicar cualquier escala flotante
@@ -244,15 +244,16 @@ def benchmark_against_resident_fp32_timer(
     batch_size: int = 1,
     page_size: int = 4096,
     num_threads: int = 2,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Compara mediante torch.utils.benchmark.Timer con hilos fijos, calentamiento y réplicas:
     1. Matriz FP32 YA RESIDENTE en memoria RAM (lista en memoria, sin reconstrucción).
     2. Ejecución Paginada Directa en Formato Fast (2-bit LUT).
     3. Ejecución Paginada Directa en Formato Compact.
     """
-    import torch.utils.benchmark as benchmark
     from trace.serialization.paged_bitcos import PagedBitCOSSerializer
+
+    import torch.utils.benchmark as benchmark
 
     torch.set_num_threads(num_threads)
     torch.manual_seed(42)

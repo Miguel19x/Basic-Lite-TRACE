@@ -24,12 +24,13 @@ if current_dir not in sys.path:
 
 import json
 import time
+from trace.models.causal import TRACECausalModel
+
 import numpy as np
 import torch
 
 from config import HybridConfig
 from data import ProceduralCompositionalDataset
-from trace.models.causal import TRACECausalModel
 from eval import evaluate_causal
 
 
@@ -121,7 +122,7 @@ def main():
     b_em, b_ci_em, b_sp, b_ci_sp = 5.122, 6.059, 81.876, 12.585
     if has_baseline:
         try:
-            with open(baseline_path, "r", encoding="utf-8") as f:
+            with open(baseline_path, encoding="utf-8") as f:
                 b_data = json.load(f)
                 b_em = b_data["aggregate_summary"]["test_comp_exact_match_pct"]["mean"]
                 b_ci_em = b_data["aggregate_summary"]["test_comp_exact_match_pct"]["ci95"]

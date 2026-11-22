@@ -7,13 +7,14 @@ Suite de Validación del Motor Nativo C (Hito 2.4) — Basic-Lite TRACE:
    contra la referencia PyTorch W1.58A8 (use_add_sub_inference=True).
 5. 100% de coincidencia textual en muestras reales de dev y test-composicional.
 """
+import copy
 import ctypes
 import os
-import torch
-import copy
-import numpy as np
-
 from trace.models.causal import TRACECausalModel
+
+import numpy as np
+import torch
+
 from data import ProceduralCompositionalDataset
 
 

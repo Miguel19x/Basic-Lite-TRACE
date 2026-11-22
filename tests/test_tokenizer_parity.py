@@ -8,18 +8,17 @@ Suite de Paridad y Validación Estricta para TRACETokenizer (Hito 3.1):
 6. Prueba de entrenamiento BPE determinista con train().
 """
 
-import os
 import ctypes
+import os
 import tempfile
 from trace.lm.tokenizer import (
-    TRACETokenizer,
-    pre_tokenize,
-    SPECIAL_PAD,
-    SPECIAL_MASK,
     SPECIAL_BOS,
     SPECIAL_EOS,
+    SPECIAL_MASK,
+    SPECIAL_PAD,
+    TRACETokenizer,
+    pre_tokenize,
 )
-
 
 TEST_SAMPLES = [
     "3.1415926535",
@@ -82,15 +81,15 @@ def test_digit_isolation_and_space_prefix():
                 assert len(seg) == 1, f"Dígito no aislado en segmento: {seg}"
 
     # Verificación de prefijo de espacio único
-    seg_hello = list(pre_tokenize(" hola mundo".encode("utf-8")))
+    seg_hello = list(pre_tokenize(b" hola mundo"))
     assert seg_hello == [b" hola", b" mundo"], f"Prefijo incorrecto: {seg_hello}"
 
     # Verificación de espacio antes de dígito: debe quedar aislado
-    seg_space_digit = list(pre_tokenize(" 42".encode("utf-8")))
+    seg_space_digit = list(pre_tokenize(b" 42"))
     assert seg_space_digit == [b" ", b"4", b"2"], f"Espacio antes de dígito incorrecto: {seg_space_digit}"
 
     # Verificación de corridas de múltiples espacios intactas (código)
-    seg_indent = list(pre_tokenize("    x".encode("utf-8")))
+    seg_indent = list(pre_tokenize(b"    x"))
     assert seg_indent == [b"    ", b"x"], f"Indentación alterada: {seg_indent}"
 
 

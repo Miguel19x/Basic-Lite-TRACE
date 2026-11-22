@@ -13,19 +13,21 @@ Condiciones Mandatorias:
 """
 
 import os
+
 os.environ["OMP_NUM_THREADS"] = "2"
 
 import copy
 import ctypes
-import sys
 import time
+
 import numpy as np
 import torch
 
 torch.set_num_threads(2)
 
-from data import ProceduralCompositionalDataset
 from trace.models.causal import TRACECausalModel
+
+from data import ProceduralCompositionalDataset
 
 BIN_PATH = "checkpoints/trace_s456_fase1_paged_bitcos.bin"
 PT_CKPT = "checkpoints/trace_s456_fase1_bitnet_last.pt"
@@ -172,21 +174,21 @@ def run_benchmark():
     throughput_addsub = 1000.0 / mean_addsub
 
     print("\n" + "-" * 78)
-    print("  RESULTADOS DE BENCHMARK (Muestras: %d, Hilos CPU: 2)" % (len(arr_c)))
+    print(f"\n  RESULTADOS DE BENCHMARK (Muestras: {len(arr_c)}, Hilos CPU: 2)")
     print("-" * 78)
-    print(f"  1. Motor C Autónomo (trace_infer AVX2 + O_DIRECT):")
+    print("  1. Motor C Autónomo (trace_infer AVX2 + O_DIRECT):")
     print(f"     - Latencia Media:   {mean_c:6.2f} ms")
     print(f"     - Latencia Mediana: {med_c:6.2f} ms")
     print(f"     - Percentil 95:     {p95_c:6.2f} ms")
     print(f"     - Throughput:       {throughput_c:6.2f} muestras/seg")
     print()
-    print(f"  2. PyTorch W1.58A8 AddSub (Referencia):")
+    print("  2. PyTorch W1.58A8 AddSub (Referencia):")
     print(f"     - Latencia Media:   {mean_addsub:6.2f} ms")
     print(f"     - Latencia Mediana: {med_addsub:6.2f} ms")
     print(f"     - Percentil 95:     {p95_addsub:6.2f} ms")
     print(f"     - Throughput:       {throughput_addsub:6.2f} muestras/seg")
     print()
-    print(f"  3. PyTorch Continuo FP32:")
+    print("  3. PyTorch Continuo FP32:")
     print(f"     - Latencia Media:   {mean_fp32:6.2f} ms")
     print(f"     - Latencia Mediana: {med_fp32:6.2f} ms")
     print(f"     - Percentil 95:     {p95_fp32:6.2f} ms")

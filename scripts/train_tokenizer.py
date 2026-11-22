@@ -11,14 +11,11 @@ garantizando cero fusiones con dígitos ASCII ('0'..'9') y reportando
 la tasa de compresión (bytes/token).
 """
 
-import os
 import argparse
-import time
 import ctypes
-from typing import List, Tuple
-
-from trace.lm.tokenizer import TRACETokenizer, VOCAB_SIZE, FIRST_MERGE
-
+import os
+import time
+from trace.lm.tokenizer import FIRST_MERGE, VOCAB_SIZE, TRACETokenizer
 
 IN_DOMAIN_PROMPTS = [
     "La arquitectura Basic-Lite TRACE opera con cuantización ternaria W1.58A8 en CPU.",
@@ -63,14 +60,14 @@ def load_c_tokenizer_lib():
     return lib
 
 
-def load_corpus_files(file_paths: List[str]) -> List[str]:
+def load_corpus_files(file_paths: list[str]) -> list[str]:
     texts = []
     total_bytes = 0
     for p in file_paths:
         if not os.path.exists(p):
             print(f"[Aviso] Archivo no encontrado: {p}, omitiendo.")
             continue
-        with open(p, "r", encoding="utf-8", errors="replace") as f:
+        with open(p, encoding="utf-8", errors="replace") as f:
             content = f.read()
             texts.append(content)
             total_bytes += len(content.encode("utf-8"))
@@ -83,7 +80,7 @@ def load_corpus_files(file_paths: List[str]) -> List[str]:
     return texts
 
 
-def evaluate_compression(tok: TRACETokenizer, prompts: List[str], label: str) -> Tuple[int, int]:
+def evaluate_compression(tok: TRACETokenizer, prompts: list[str], label: str) -> tuple[int, int]:
     print(f"\n--- {label} ---")
     total_raw = 0
     total_tok = 0
@@ -103,7 +100,7 @@ def evaluate_compression(tok: TRACETokenizer, prompts: List[str], label: str) ->
     return total_raw, total_tok
 
 
-def verify_c_parity(bin_path: str, tok: TRACETokenizer, prompts: List[str]) -> None:
+def verify_c_parity(bin_path: str, tok: TRACETokenizer, prompts: list[str]) -> None:
     c_lib = load_c_tokenizer_lib()
     model_sz = c_lib.trace_tokenizer_sizeof()
     c_tok_buf = ctypes.create_string_buffer(model_sz)

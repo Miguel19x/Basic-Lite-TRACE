@@ -3,11 +3,11 @@
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
+from trace.layers.bitlinear import BitLinear
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from trace.layers.bitlinear import BitLinear
 
 
 class TernaryExpert(nn.Module):

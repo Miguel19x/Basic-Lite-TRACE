@@ -8,16 +8,15 @@ TRACELanguageModel: Modelo de Lenguaje Autorregresivo de Ultra-Baja Precisión
 Combina MLA 100% Ternaria, FFN denso ternario (Squared-ReLU) y tied embeddings.
 """
 
-from typing import Optional, Tuple
+from trace.layers.bitlinear import BitLinear
+from trace.layers.ffn import TernaryExpert
+from trace.layers.norm import RMSNorm
+from trace.lm.config import TRACELMConfig
+from trace.lm.mla import MultiHeadLatentAttention
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from trace.layers.norm import RMSNorm
-from trace.layers.bitlinear import BitLinear
-from trace.layers.ffn import TernaryExpert
-from trace.lm.config import TRACELMConfig
-from trace.lm.mla import MultiHeadLatentAttention
 
 
 class TRACELMBlock(nn.Module):
@@ -31,12 +30,12 @@ class TRACELMBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
-        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attn_mask: torch.Tensor | None = None,
+        kv_cache: tuple[torch.Tensor, torch.Tensor] | None = None,
         use_weight_absorption: bool = False,
         quantize_kv_int8: bool = False,
         add_sub_mode: bool = False,
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         h, new_cache = self.attn(
             self.attn_norm(x),
             attn_mask=attn_mask,
@@ -70,7 +69,7 @@ class TRACELanguageModel(nn.Module):
             if hasattr(module, "bias") and module.bias is not None:
                 nn.init.zeros_(module.bias)
 
-    def build_causal_mask(self, seq_len: int, total_len: int, device: torch.device) -> Optional[torch.Tensor]:
+    def build_causal_mask(self, seq_len: int, total_len: int, device: torch.device) -> torch.Tensor | None:
         """Máscara causal compatible con Prefix Caching (past_len > 0 y seq_len >= 1)."""
         if seq_len == 1 and total_len == 1:
             return None
@@ -114,12 +113,12 @@ class TRACELanguageModel(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        targets: Optional[torch.Tensor] = None,
-        kv_caches: Optional[list] = None,
+        targets: torch.Tensor | None = None,
+        kv_caches: list | None = None,
         use_weight_absorption: bool = False,
         quantize_kv_int8: bool = False,
-        add_sub_mode: Optional[bool] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], list]:
+        add_sub_mode: bool | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, list]:
         B, S = input_ids.shape
         past_len = kv_caches[0][0].shape[1] if kv_caches is not None else 0
         total_len = past_len + S
@@ -173,7 +172,7 @@ class TRACELanguageModel(nn.Module):
         max_new_tokens: int = 32,
         temperature: float = 1.0,
         top_k: int = 50,
-        eos_token_id: Optional[int] = None,
+        eos_token_id: int | None = None,
         quantize_kv_int8: bool = False,
     ) -> torch.Tensor:
         """Generación con prefill único y decodificación incremental token a token con kv_caches y absorción."""

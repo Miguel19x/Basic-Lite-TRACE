@@ -10,11 +10,11 @@ Suite de Validación y Contratos Arquitectónicos para TRACELanguageModel (Hito 
 8. Paridad exacta de generate(temperature=0.0) vs decodificación greedy paso a paso sin caché.
 """
 
-import torch
-import torch.nn.functional as F
 from trace.layers.bitlinear import BitLinear
 from trace.lm.config import TRACELMConfig
 from trace.lm.model import TRACELanguageModel, TRACELMBlock
+
+import torch
 
 
 def test_tied_embeddings_and_bitlinear_projections():
@@ -149,7 +149,7 @@ def test_monotonic_loss_decrease_and_gradients():
         losses.append(loss.item())
 
     assert losses[-1] < losses[0], f"La pérdida no decreció: inicial={losses[0]:.4f}, final={losses[-1]:.4f}"
-    print(f"✓ Gradientes finitos y no-nulos verificados en W_dkv, W_uk, W_uv y tok_emb.")
+    print("✓ Gradientes finitos y no-nulos verificados en W_dkv, W_uk, W_uv y tok_emb.")
     print(f"✓ Descenso monótono de pérdida verificado en 5 pasos: {losses[0]:.4f} -> {losses[-1]:.4f}")
 
 
