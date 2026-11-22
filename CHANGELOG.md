@@ -4,6 +4,32 @@ Todas las modificaciones, versiones y evoluciones arquitectónicas de **Basic-Li
 
 ---
 
+## [TRACE-1.1.0] — Desbloqueo Aritmético y Causalidad Decimal — 2026-11-21
+
+### ⚠️ Ruptura de Compatibilidad (Breaking Changes)
+* **Incompatibilidad Estructural con Checkpoints v1.0.0-trace (`trace_column_checkpoint.pt`):**
+  - La carga de checkpoints anteriores mediante `load_state_dict()` falla por discrepancia estructural en `TRACECausalModel`:
+    1. **Cabezal de Lenguaje (`lm_head`):** Migración desde `BitLinear` (que contenía pesos ternarios cuantizados y norma `sub_ln.weight`) a `nn.Linear(d_model, vocab_size, bias=False)` en FP32 de rango dinámico completo.
+    2. **Condicionamiento de Etapa (`stage_emb`):** Reemplazo de las incrustaciones de tiempo/difusión (`time_emb`) por una incrustación discreta de etapa de 4 estados (`stage_emb = nn.Embedding(4, d_model)` para $stage\_id \in \{0, 1, 2, 3\}$).
+    3. **Máscara Unificada de Target:** Sustitución de la máscara causal por bloques (`build_block_causal_mask`, `block_size=16`) por la máscara causal de bloque unificado bidireccional (`build_target_unified_mask`).
+  *(Nota: El desacoplamiento causal entre Etapa 1 y Etapa 2 con `detach()` se mantiene intacto respecto a v1.0.0-trace).*
+
+### Añadido y Consolidado
+* **Resultados Empíricos Fase 2b (Exploratorio, post-prereg-v1, §9.4):**
+  - Registro formal del artefacto `results/eval_fase2b_unblock_5semillas_results.json`:
+    - Evaluación multi-semilla (42, 123, 456, 789, 999) tras 3000 pasos en Colab GPU con Train-200 muestreado sin reemplazo (§1.2.4).
+    - Test-Composicional Full-EM: media $19.04\%$ (DE $22.73\%$, mediana $8.75\%$, IC95 bootstrap $[4.04\%, 43.12\%]$, pico $58.13\%$ en Semilla 999).
+    - Exact Match Scratchpad Etapa 1 ($P_w, P_{ms}$): media $98.21\%$ (pares conocidos de entrenamiento).
+    - Veredicto formal bajo H-A1: **INCONCLUSO** (IC95 cruza umbrales de 10% y 30%; contraste pareado cruza 0).
+* **Diagnóstico Causal y Refutaciones Empíricas:**
+  - *Refutación de grokking puro:* Train-200 y Test-Comp escalan en paralelo en las 5 semillas. El cuello de botella es subajuste de optimización QAT (meseta del STE con $lr=3\text{e-}4$), no sobreajuste.
+  - *Refutación de bloqueo por acarreos/préstamos:* La exactitud en watt es plana (~73%-76%) entre `no_carry`, `single_carry` y `double_carry`. En ms, `borrow` ($91.7\%$) es el subcampo mejor resuelto.
+  - *Firma de los 201 fallos:* Concentración en errores de una sola columna (`watt_±10`: 54 casos; `ms_±1`: 58 casos) y subajuste en pares específicos (`boost x media`: 15.0%).
+* **Gobernanza y Arquitectura:**
+  - Creación de `docs/ROADMAP_TRACE.md`: Hoja de ruta oficial de 6 fases con puertas de salida estrictas y separación estratégica en dos carriles (Carril A: Motor C en i3-1115G4 para pesos abiertos 2-bit; Carril B: Pesos propios TRACE en Colab GPU).
+
+---
+
 ## [TRACE-1.0.0] — Arquitectura TRACE Convergente — 2026-11-17
 
 ### Añadido y Consolidado
