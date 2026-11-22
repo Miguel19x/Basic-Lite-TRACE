@@ -54,18 +54,27 @@ class TRACECausalModel(nn.Module):
         self.final_norm = RMSNorm(cfg.d_model, eps=cfg.eps)
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
 
-    def configure_adamw_groups(self) -> List[Dict]:
-        """Configuración de decaimiento desacoplado de pesos (no-decay en normas, escalas y BitLinear)."""
+    def configure_adamw_groups(self, bitlinear_weight_decay: float = 0.0) -> List[Dict]:
+        """
+        Configuración de decaimiento desacoplado en 3 grupos (BitNet b1.58):
+        1. dense_decay: matrices densas FP32 (ej. lm_head) con weight_decay estándar.
+        2. bitlinear_shadow: shadow weights de BitLinear con decaimiento dinámico de etapa.
+        3. no_decay: normas, embeddings, compuertas y parámetros 1D con 0.0.
+        """
         bitlinear_param_ids = {
             id(p) for m in self.modules() if isinstance(m, BitLinear) for p in m.parameters()
         }
-        decay, no_decay = [], []
+        decay, bitlinear_shadow, no_decay = [], [], []
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
-            if (
+            if id(param) in bitlinear_param_ids:
+                if param.ndim >= 2:
+                    bitlinear_shadow.append(param)
+                else:
+                    no_decay.append(param)
+            elif (
                 param.ndim < 2
-                or id(param) in bitlinear_param_ids
                 or "emb" in name
                 or "norm" in name
                 or "alpha" in name
@@ -76,8 +85,9 @@ class TRACECausalModel(nn.Module):
             else:
                 decay.append(param)
         return [
-            {"params": decay, "weight_decay": self.cfg.weight_decay},
-            {"params": no_decay, "weight_decay": 0.0},
+            {"params": decay, "weight_decay": self.cfg.weight_decay, "name": "dense_decay"},
+            {"params": bitlinear_shadow, "weight_decay": bitlinear_weight_decay, "name": "bitlinear_shadow"},
+            {"params": no_decay, "weight_decay": 0.0, "name": "no_decay"},
         ]
 
     def compute_input_embeddings(self, x_t: torch.Tensor) -> torch.Tensor:
@@ -94,6 +104,7 @@ class TRACECausalModel(nn.Module):
         stage_id: int = 0,
         attn_mask: Optional[torch.Tensor] = None,
         eval_mask: Optional[torch.Tensor] = None,
+        record_telemetry: bool = False,
     ) -> torch.Tensor:
         """
         Ejecuta el paso hacia adelante a través del núcleo recursivo ternario.
@@ -130,7 +141,7 @@ class TRACECausalModel(nn.Module):
         y_r = torch.zeros_like(a)
 
         anchor_feat = self.resident_core.anchor_proj(
-            a, record_telemetry=False, integer_mode=False, add_sub_mode=False
+            a, record_telemetry=record_telemetry, integer_mode=False, add_sub_mode=False
         )
 
         active_mask = torch.ones(B, L, 1, device=x_t.device)
@@ -148,7 +159,7 @@ class TRACECausalModel(nn.Module):
                 active_mask,
                 latent_kv_cache=None,
                 start_pos=0,
-                record_telemetry=False,
+                record_telemetry=(record_telemetry and r == 0),
                 integer_mode=False,
                 add_sub_mode=False,
                 attn_mask=attn_mask,
@@ -166,6 +177,7 @@ class TRACECausalModel(nn.Module):
         prompt_lens: List[int],
         t_noise: torch.Tensor,
         scheduled_sampling_p: float = 0.85,
+        record_telemetry: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """
         Paso hacia adelante de 2 etapas para entrenamiento conjunto.
@@ -217,7 +229,8 @@ class TRACECausalModel(nn.Module):
 
         # --- EJECUCIÓN ETAPA 1 (Multiplicaciones Subtotales) ---
         logits_stage1 = self.forward_backbone(
-            x_stage1, t_noise, stage_id=0, attn_mask=attn_mask, eval_mask=stage1_digit_mask
+            x_stage1, t_noise, stage_id=0, attn_mask=attn_mask, eval_mask=stage1_digit_mask,
+            record_telemetry=record_telemetry
         )
 
         # Pérdida de Etapa 1
@@ -389,6 +402,8 @@ class TRACECausalModel(nn.Module):
 
         # --- PASADA 1: Predecir Subtotales ---
         logits_1 = self.forward_backbone(x, t_noise, stage_id=0, attn_mask=attn_mask)
+        probs_pw = F.softmax(logits_1[0, pw_start:pw_end], dim=-1)
+        probs_pms = F.softmax(logits_1[0, pms_start:pms_end], dim=-1)
         pred_pw_tokens = logits_1[0, pw_start:pw_end].argmax(dim=-1)
         pred_pms_tokens = logits_1[0, pms_start:pms_end].argmax(dim=-1)
 
@@ -405,6 +420,8 @@ class TRACECausalModel(nn.Module):
         # --- ETAPA 2: CAMPO CAUSAL POR COLUMNAS (DERECHA A IZQUIERDA) ---
         # 3.1. Predecir Unidades (offset +2)
         logits_units = self.forward_backbone(x, t_noise, stage_id=1, attn_mask=attn_mask)
+        prob_w_u = F.softmax(logits_units[0, watt_start + 2], dim=-1).max().item()
+        prob_ms_u = F.softmax(logits_units[0, ms_start + 2], dim=-1).max().item()
         pred_w_u = logits_units[0, watt_start + 2].argmax(dim=-1)
         pred_ms_u = logits_units[0, ms_start + 2].argmax(dim=-1)
         x[0, watt_start + 2] = pred_w_u
@@ -412,6 +429,8 @@ class TRACECausalModel(nn.Module):
 
         # 3.2. Predecir Decenas (offset +1, con unidades fijadas como hechos del contexto)
         logits_tens = self.forward_backbone(x, t_noise, stage_id=2, attn_mask=attn_mask)
+        prob_w_t = F.softmax(logits_tens[0, watt_start + 1], dim=-1).max().item()
+        prob_ms_t = F.softmax(logits_tens[0, ms_start + 1], dim=-1).max().item()
         pred_w_t = logits_tens[0, watt_start + 1].argmax(dim=-1)
         pred_ms_t = logits_tens[0, ms_start + 1].argmax(dim=-1)
         x[0, watt_start + 1] = pred_w_t
@@ -419,6 +438,8 @@ class TRACECausalModel(nn.Module):
 
         # 3.3. Predecir Centenas (offset +0, con decenas y unidades fijadas en contexto)
         logits_hundreds = self.forward_backbone(x, t_noise, stage_id=3, attn_mask=attn_mask)
+        prob_w_h = F.softmax(logits_hundreds[0, watt_start], dim=-1).max().item()
+        prob_ms_h = F.softmax(logits_hundreds[0, ms_start], dim=-1).max().item()
         pred_w_h = logits_hundreds[0, watt_start].argmax(dim=-1)
         pred_ms_h = logits_hundreds[0, ms_start].argmax(dim=-1)
         x[0, watt_start] = pred_w_h
@@ -437,6 +458,12 @@ class TRACECausalModel(nn.Module):
 
         full_output_str = f"pw: {pw_str}\npms: {pms_str}\nwatt: {watt_str}\nms: {ms_str}\n"
 
+        pw_confs = probs_pw.max(dim=-1).values.tolist()
+        pms_confs = probs_pms.max(dim=-1).values.tolist()
+        watt_confs = [prob_w_h, prob_w_t, prob_w_u]
+        ms_confs = [prob_ms_h, prob_ms_t, prob_ms_u]
+        digit_confidences = pw_confs + pms_confs + watt_confs + ms_confs
+
         meta = {
             "pw": pw_str,
             "pms": pms_str,
@@ -450,6 +477,7 @@ class TRACECausalModel(nn.Module):
             "pred_pms_raw_int": int(pred_pms_raw) if pred_pms_raw.isdigit() else None,
             "watt_int": int(watt_str) if watt_str.isdigit() else None,
             "ms_int": int(ms_str) if ms_str.isdigit() else None,
+            "digit_confidences": digit_confidences,
         }
 
         return full_output_str, meta
