@@ -6,14 +6,17 @@
 
 """
 Basic-Lite 0.2 — Pipeline de Entrenamiento Causal de 2 Etapas
-Incorpora Abacus Positional Embeddings y Desacoplamiento Causal (Subtotales -> Totales).
+Incorpora Abacus Positional Embeddings, Desacoplamiento Causal (Subtotales -> Totales),
+Schedule QAT de 2 Etapas (BitNet b1.58) y Telemetría de Saturación/Flips.
 """
 
 import os
 import sys
 import time
 import argparse
-from typing import List, Tuple
+import math
+import random
+from typing import List, Optional, Tuple
 import torch
 from torch.utils.data import DataLoader
 
@@ -46,9 +49,16 @@ def train(
     device_name: str = "auto",
     eval_interval: int = 200,
     warmup_ratio: float = 0.40,
+    warmup_steps: Optional[int] = None,
+    lr_warmup_steps: int = 300,
+    use_bitnet_schedule: bool = False,
+    lr_peak: float = 1.0e-3,
+    lr_min: float = 1.5e-4,
+    bitlinear_wd_init: float = 0.05,
     checkpoint_out: str = "trace_checkpoint.pt",
 ):
     torch.manual_seed(seed)
+    random.seed(seed)
     if device_name == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -56,7 +66,12 @@ def train(
 
     print("=" * 80)
     print("Basic-Lite TRACE — Entrenamiento Causal de 2 Etapas")
-    print(f"Dispositivo: {device} | Semilla: {seed} | Pasos: {steps} | LR: {lr:.2e} | Lote: {batch_size}")
+    mode_str = "BitNet b1.58 (2 Etapas + Coseno)" if use_bitnet_schedule else "Estándar (LR Fijo)"
+    print(f"Modo: {mode_str} | Dispositivo: {device} | Semilla: {seed} | Pasos: {steps} | Lote: {batch_size}")
+    if use_bitnet_schedule:
+        print(f"Schedule: LR Peak={lr_peak:.2e} -> Min={lr_min:.2e} | LR Warmup={lr_warmup_steps} | Init WD(BitLinear)={bitlinear_wd_init}")
+    else:
+        print(f"LR Constante: {lr:.2e}")
     print("=" * 80)
 
     cfg = HybridConfig(
@@ -70,14 +85,23 @@ def train(
 
     # Conjuntos de datos pre-registrados
     train_dataset = ProceduralCompositionalDataset(cfg, split="train")
+    train_200_dataset = ProceduralCompositionalDataset(cfg, split="train")
+    train_200_dataset.samples = random.Random(42).sample(train_dataset.unique_records, 200)
+
     dev_dataset = ProceduralCompositionalDataset(cfg, split="dev")
     test_comp_dataset = ProceduralCompositionalDataset(cfg, split="test-composicional")
 
     model = TRACECausalModel(cfg).to(device)
 
-    # Optimizador con grupos desacoplados de decaimiento
-    param_groups = model.configure_adamw_groups()
-    optimizer = torch.optim.AdamW(param_groups, lr=lr, betas=(0.9, 0.98), eps=1e-8)
+    # Optimizador con grupos desacoplados de decaimiento (BitNet b1.58: 3 grupos)
+    init_bitlinear_wd = bitlinear_wd_init if use_bitnet_schedule else 0.0
+    param_groups = model.configure_adamw_groups(bitlinear_weight_decay=init_bitlinear_wd)
+    initial_lr = lr_peak if use_bitnet_schedule else lr
+    optimizer = torch.optim.AdamW(param_groups, lr=initial_lr, betas=(0.9, 0.98), eps=1e-8)
+
+    # Desacoplamiento de warmups
+    sched_warmup = warmup_steps if warmup_steps is not None else int(steps * warmup_ratio)
+    lr_warmup = lr_warmup_steps if use_bitnet_schedule else sched_warmup
 
     # Creador de lotes
     def get_batch_iterator():
@@ -96,7 +120,7 @@ def train(
 
     batch_iter = get_batch_iterator()
 
-    print(f"[*] Inicio del entrenamiento. Muestras Train: {len(train_dataset)} | Dev: {len(dev_dataset)}")
+    print(f"[*] Inicio del entrenamiento. Muestras Train: {len(train_dataset)} | Dev: {len(dev_dataset)} | Sched Warmup: {sched_warmup}")
     t0_start = time.time()
     best_dev_em = -1.0
     best_dev_score = -1.0
@@ -107,19 +131,36 @@ def train(
         x_0 = x_0.to(device)
         t_noise = torch.ones(x_0.shape[0], device=device)
 
-        # Currículo en 2 Fases (Staged Warmup):
-        # Fase A (primer 40% de pasos): sched_p = 1.0 (anclaje con ground truth en subtotales
-        # para que la Etapa 2 aprenda a sumar sin verse contaminada por predicciones iniciales ruidosas).
-        # Fase B: decaimiento gradual de 1.0 a 0.70 para mitigar el sesgo de exposición (exposure bias).
-        warmup_steps = int(steps * warmup_ratio)
-        if step <= warmup_steps:
+        # Currículo de Scheduled Sampling para anclaje de Etapa 1
+        if step <= sched_warmup:
             sched_p = 1.0
         else:
-            progress = (step - warmup_steps) / max(1, steps - warmup_steps)
+            progress = (step - sched_warmup) / max(1, steps - sched_warmup)
             sched_p = max(0.70, 1.0 - 0.30 * progress)
 
+        # Schedule BitNet b1.58: LR Coseno y Weight Decay de 2 Etapas
+        if use_bitnet_schedule:
+            if step <= lr_warmup:
+                curr_lr = lr_peak * (step / max(1, lr_warmup))
+            else:
+                decay_progress = (step - lr_warmup) / max(1, steps - lr_warmup)
+                curr_lr = lr_min + 0.5 * (lr_peak - lr_min) * (1.0 + math.cos(math.pi * decay_progress))
+            for pg in optimizer.param_groups:
+                pg["lr"] = curr_lr
+
+            # En la segunda mitad del entrenamiento (Fase 2), bajar decay de shadow weights a 0.0
+            if step >= (steps // 2):
+                for pg in optimizer.param_groups:
+                    if pg.get("name") == "bitlinear_shadow":
+                        pg["weight_decay"] = 0.0
+
+        # Telemetría de saturación y cambios de signo (flips)
+        record_telemetry = (step % 50 == 0 or step == 1 or step == steps or (steps <= 20 and step % 2 == 0))
+
         optimizer.zero_grad()
-        out = model.forward_two_stage(x_0, plen_list, t_noise, scheduled_sampling_p=sched_p)
+        out = model.forward_two_stage(
+            x_0, plen_list, t_noise, scheduled_sampling_p=sched_p, record_telemetry=record_telemetry
+        )
         loss = out["loss"]
         loss.backward()
 
@@ -127,18 +168,37 @@ def train(
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        if step % 50 == 0 or step == 1:
+        if step % 50 == 0 or step == 1 or step == steps or (steps <= 20 and step % 2 == 0):
             u_loss = out.get("loss_units", torch.tensor(0.0)).item()
             t_loss = out.get("loss_tens", torch.tensor(0.0)).item()
             h_loss = out.get("loss_hundreds", torch.tensor(0.0)).item()
+            telem_str = ""
+            if record_telemetry:
+                from trace.layers.bitlinear import BitLinear
+                sats = [m.last_stats["act_saturation"] for m in model.modules() if isinstance(m, BitLinear) and "act_saturation" in m.last_stats]
+                flips = [m.last_stats["code_flip_rate"] for m in model.modules() if isinstance(m, BitLinear) and "code_flip_rate" in m.last_stats]
+                avg_sat = (sum(sats) / len(sats)) * 100.0 if sats else 0.0
+                avg_flip = (sum(flips) / len(flips)) * 100.0 if flips else 0.0
+                telem_str = f" | ActSat: {avg_sat:.1f}% | Flips: {avg_flip:.2f}%"
+
+            current_lr_val = optimizer.param_groups[0]["lr"]
             print(
                 f"Paso {step:04d}/{steps} | Loss: {loss.item():.4f} "
                 f"(S1: {out['loss_stage1'].item():.4f}, U: {u_loss:.4f}, D: {t_loss:.4f}, C: {h_loss:.4f}) | "
-                f"SchedP: {sched_p:.2f}"
+                f"SchedP: {sched_p:.2f} | LR: {current_lr_val:.2e}{telem_str}"
             )
 
         if step % eval_interval == 0 or step == steps:
-            print(f"\n--- EVALUACIÓN EN DEV (Paso {step}) ---")
+            print(f"\n--- EVALUACIÓN PERIÓDICA (Paso {step}) ---")
+            train_200_metrics = evaluate_causal(model, train_200_dataset, device)
+            print(
+                f"  TRAIN-200: ExactMatch={train_200_metrics['exact_match_pct']:.2f}% | "
+                f"SP-EM={train_200_metrics['scratchpad_exact_pct']:.2f}% | "
+                f"DigAcc={train_200_metrics['digit_acc_pct']:.2f}% | "
+                f"ECE={train_200_metrics.get('ece_pct', 0.0):.2f}% | "
+                f"S2-ECE={train_200_metrics.get('stage2_ece_pct', 0.0):.2f}%"
+            )
+
             dev_metrics = evaluate_causal(model, dev_dataset, device)
             print(
                 f"  DEV: ExactMatch={dev_metrics['exact_match_pct']:.2f}% "
@@ -146,11 +206,13 @@ def train(
                 f"ScratchpadEM={dev_metrics['scratchpad_exact_pct']:.2f}% | "
                 f"FinalEM={dev_metrics['final_exact_pct']:.2f}% | "
                 f"DigAcc={dev_metrics['digit_acc_pct']:.2f}% | "
-                f"FmtValid={dev_metrics['fmt_valid_pct']:.2f}%"
+                f"ECE={dev_metrics.get('ece_pct', 0.0):.2f}% | "
+                f"S2-ECE={dev_metrics.get('stage2_ece_pct', 0.0):.2f}% | "
+                f"HiConf(>=0.85)={dev_metrics.get('high_conf_acc_pct', 0.0):.1f}% ({dev_metrics.get('high_conf_count', 0)}) | "
+                f"LoConf(<0.85)={dev_metrics.get('low_conf_acc_pct', 0.0):.1f}% ({dev_metrics.get('low_conf_count', 0)})"
             )
 
-            # Puntuación compuesta para desempate en fases tempranas (evita estancamiento en step temprano cuando EM=0%)
-            # Jerarquía estricta: ExactMatch (10000x) > FinalEM (1000x) > ScratchpadEM (100x) > DigAcc (1x)
+            # Puntuación compuesta para desempate en fases tempranas
             dev_score = (
                 dev_metrics["exact_match_pct"] * 10000.0
                 + dev_metrics["final_exact_pct"] * 1000.0
@@ -211,7 +273,10 @@ def train(
         f"ScratchpadEM={comp_metrics['scratchpad_exact_pct']:.2f}% | "
         f"FinalEM={comp_metrics['final_exact_pct']:.2f}% | "
         f"DigAcc={comp_metrics['digit_acc_pct']:.2f}% | "
-        f"FmtValid={comp_metrics['fmt_valid_pct']:.2f}%"
+        f"ECE={comp_metrics.get('ece_pct', 0.0):.2f}% | "
+        f"S2-ECE={comp_metrics.get('stage2_ece_pct', 0.0):.2f}% | "
+        f"HiConf(>=0.85)={comp_metrics.get('high_conf_acc_pct', 0.0):.1f}% ({comp_metrics.get('high_conf_count', 0)}) | "
+        f"LoConf(<0.85)={comp_metrics.get('low_conf_acc_pct', 0.0):.1f}% ({comp_metrics.get('low_conf_count', 0)})"
     )
 
     return comp_metrics
@@ -220,12 +285,18 @@ def train(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Entrenamiento Causal de 2 Etapas — Basic-Lite TRACE")
     parser.add_argument("--steps", type=int, default=1000, help="Pasos de entrenamiento")
-    parser.add_argument("--lr", type=float, default=3e-4, help="Tasa de aprendizaje")
+    parser.add_argument("--lr", type=float, default=3e-4, help="Tasa de aprendizaje (estándar)")
     parser.add_argument("--batch_size", type=int, default=32, help="Tamaño de lote")
     parser.add_argument("--seed", type=int, default=42, help="Semilla aleatoria")
     parser.add_argument("--device", type=str, default="auto", help="cpu o cuda")
     parser.add_argument("--eval_interval", type=int, default=200, help="Intervalo de evaluación")
-    parser.add_argument("--warmup_ratio", type=float, default=0.40, help="Fracción de pasos con sched_p = 1.0 (anclaje perfecto)")
+    parser.add_argument("--warmup_ratio", type=float, default=0.40, help="Fracción de pasos con sched_p = 1.0 (si warmup_steps es None)")
+    parser.add_argument("--warmup_steps", type=int, default=None, help="Pasos fijos con sched_p = 1.0 (anclaje perfecto de subtotales)")
+    parser.add_argument("--lr_warmup_steps", type=int, default=300, help="Pasos de rampa lineal para LR hacia lr_peak")
+    parser.add_argument("--bitnet_schedule", action="store_true", help="Activar schedule QAT de 2 etapas estilo BitNet b1.58")
+    parser.add_argument("--lr_peak", type=float, default=1.0e-3, help="LR pico para schedule BitNet")
+    parser.add_argument("--lr_min", type=float, default=1.5e-4, help="LR mínimo para decaimiento coseno")
+    parser.add_argument("--bitlinear_wd", type=float, default=0.05, help="Weight decay inicial para shadow weights de BitLinear")
     parser.add_argument("--out", type=str, default="trace_checkpoint.pt", help="Ruta de checkpoint")
     args = parser.parse_args()
 
@@ -237,5 +308,11 @@ if __name__ == "__main__":
         device_name=args.device,
         eval_interval=args.eval_interval,
         warmup_ratio=args.warmup_ratio,
+        warmup_steps=args.warmup_steps,
+        lr_warmup_steps=args.lr_warmup_steps,
+        use_bitnet_schedule=args.bitnet_schedule,
+        lr_peak=args.lr_peak,
+        lr_min=args.lr_min,
+        bitlinear_wd_init=args.bitlinear_wd,
         checkpoint_out=args.out,
     )

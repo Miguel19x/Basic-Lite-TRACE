@@ -23,7 +23,7 @@ La arquitectura **TRACE** (*Ternary Resident Architecture for Convergent Executi
   El núcleo residente compartido ([trace/modules/resident_core.py](trace/modules/resident_core.py)) no apila capas densas tradicionales, sino que reitera $R$ pasos de recursión sobre un estado latente dual: razonamiento profundo ($z_r$) y respuesta ($y_r$). Incluye codificación sinusoidal continua de profundidad $e_r$ y una compuerta adaptativa de parada temprana (*adaptive halting gate*).
 
 * **Convergent / Causal (Campo Causal Desacoplado en 2 Etapas):**  
-  El mecanismo de generación en producción es el **Campo Causal Desacoplado en 2 Etapas con `detach()`** ([trace/models/causal.py](trace/models/causal.py)). Este desacopla la predicción de subtotales multiplicativos ($pw, pms$) de las sumas finales ($watt, ms$), escalando el Full-EM a **$5.12\% \pm 4.88\%$** (con pico de **$13.33\%$**) y resolviendo los subtotales al **$81.88\%$**.
+  El mecanismo de generación en producción es el **Campo Causal Desacoplado en 2 Etapas con `detach()`** ([trace/models/causal.py](trace/models/causal.py)). Este desacopla la predicción de subtotales multiplicativos ($pw, pms$) de las sumas finales ($watt, ms$). Con la introducción del schedule QAT de 2 etapas estilo BitNet b1.58 (Fase 1, v1.2.0-trace), el Full-EM escala a **$90.29\% \pm 13.44\%$** en Test-Composicional (con pico de **$98.96\%$** en Semilla 456 y media de **$99.70\%$** en Train-200), resolviendo los subtotales al **$100.00\%$** con una calibración esperada ECE de **$0.61\%$**.
 
 ---
 
@@ -96,44 +96,48 @@ flowchart TD
 
 ---
 
-## 4. Resultados Experimentales Confirmatorios Oficiales (5 Semillas)
+## 4. Resultados Experimentales y Evolución Arquitectónica (5 Semillas)
 
-Los experimentos se ejecutaron bajo el protocolo pre-registrado oficial ([Protocolo pre-registrado — Basic-Lite (TRDM-v5), Fase 1.md](Protocolo%20pre-registrado%20%E2%80%94%20Basic-Lite%20(TRDM-v5),%20Fase%201.md)), evaluando 3000 pasos en las 5 semillas oficiales (`42, 123, 456, 789, 999`):
+### 4.1. Resultados Consolidados de Fase 1 (v1.2.0-trace — BitNet b1.58 Schedule)
+Evaluación formal sobre los 5 checkpoints finales al paso 6000 (`_last.pt`) en CPU (2 hilos i3-1115G4), reportada en [results/eval_fase1_bitnet_5semillas_results.json](results/eval_fase1_bitnet_5semillas_results.json):
 
-### 4.1. Comparativa Histórica de Evolución
-
-| Métrica en `test-composicional` (480 casos) | **Fase 1: TRDM-v5 (Etiqueta `prereg-v1`)** | **Fase 2: TRACE Estable (TRDM-v6)** | Impacto / Delta |
+| Métrica | Fase 2b (Línea Base) | **Fase 1 (BitNet QAT Schedule, v1.2.0)** | Impacto / Delta |
 | :--- | :---: | :---: | :---: |
-| **Exact Match Total (Full-EM)** | $0.04\% \pm 0.09\%$ (4 de 5 semillas en 0%) | **$5.12\% \pm 4.88\%$** (Máx: **$13.33\%$**) | **+5.08 pp (Ruptura de Nulidad)** |
-| **Exact Match Scratchpad ($P_w, P_{ms}$)** | Colapsado / Fragmentado (< 5%) | **$81.88\% \pm 10.14\%$** (Máx: **$95.00\%$**) | **+76.88 pp (Multiplicación Resuelta)** |
-| **Validez Sintáctica de Formato** | $61.00\% \pm 21.49\%$ | **$100.00\% \pm 0.00\%$** | **+39.00 pp (Estructura Perfecta)** |
-| **Exactitud Aislada en Dígitos** | $60.50\% \pm 3.10\%$ | **$81.97\% \pm 3.90\%$** | **+21.47 pp** |
-
-*Artefacto oficial de resultados:* [results/eval_confirmatorio_5semillas_results.json](results/eval_confirmatorio_5semillas_results.json)
-
-### 4.2. Desglose de las 5 Semillas Confirmatorias
+| **Exact Match Total (Full-EM en Test-Comp)** | $19.04\% \pm 22.73\%$ (Mediana: $8.75\%$) | **$90.29\% \pm 13.44\%$** (Mediana: **$95.21\%$**) | **+71.25 pp (Generalización Masiva)** |
+| **Exact Match Scratchpad ($P_w, P_{ms}$)** | $98.21\% \pm 1.01\%$ | **$100.00\% \pm 0.00\%$** (480/480 en 5 semillas) | **+1.79 pp (Etapa 1 Perfecta)** |
+| **Exactitud Aislada en Dígitos** | $88.20\% \pm 5.61\%$ | **$98.94\% \pm 1.58\%$** | **+10.74 pp** |
+| **Train-200 Full-EM (sin reemplazo)** | $24.90\% \pm 26.23\%$ | **$99.70\% \pm 0.27\%$** | **+74.80 pp (Ajuste Casi Perfecto)** |
+| **DEV Full-EM (108 casos)** | $21.67\% \pm 25.64\%$ | **$94.81\% \pm 10.07\%$** | **+73.14 pp** |
+| **Test-Azar Full-EM (240 casos)** | $19.58\% \pm 22.84\%$ | **$94.58\% \pm 8.18\%$** | **+75.00 pp** |
+| **Calibración ECE en Test-Comp** | *No registrado* | **$0.61\%$** (Etapa 2: $1.22\%$) | **Calibración Óptima** |
 
 ```text
-[Semilla  42] Test-Comp: EM =  5.62% | Scratchpad EM = 88.75% | DEV: EM = 16.67%
-[Semilla 123] Test-Comp: EM = 13.33% | Scratchpad EM = 95.00% | DEV: EM = 13.89%
-[Semilla 456] Test-Comp: EM =  2.08% | Scratchpad EM = 72.29% | DEV: EM =  2.78%
-[Semilla 789] Test-Comp: EM =  3.33% | Scratchpad EM = 71.88% | DEV: EM =  2.78%
-[Semilla 999] Test-Comp: EM =  1.25% | Scratchpad EM = 81.46% | DEV: EM =  2.78%
---------------------------------------------------------------------------------------
-Media Global : Test-Comp: EM =  5.12% ± 4.88% (IC95: [-0.93%, 11.17%])
-Scratchpad EM: Test-Comp: EM = 81.88% ± 10.14% (IC95: [69.28%, 94.47%])
+[Semilla  42] Test-Comp: EM = 94.17% (452/480) | SP-EM = 100.00% | ECE = 0.37% | DEV: EM =  98.15%
+[Semilla 123] Test-Comp: EM = 66.46% (319/480) | SP-EM = 100.00% | ECE = 2.01% | DEV: EM =  76.85%
+[Semilla 456] Test-Comp: EM = 98.96% (475/480) | SP-EM = 100.00% | ECE = 0.06% | DEV: EM = 100.00%
+[Semilla 789] Test-Comp: EM = 95.21% (457/480) | SP-EM = 100.00% | ECE = 0.35% | DEV: EM = 100.00%
+[Semilla 999] Test-Comp: EM = 96.67% (464/480) | SP-EM = 100.00% | ECE = 0.25% | DEV: EM =  99.07%
+------------------------------------------------------------------------------------------------------
+Media Global : Test-Comp: EM = 90.29% ± 13.44% (IC95 Bootstrap: [78.04%, 97.29%])
+Scratchpad EM: Test-Comp: EM = 100.00% ± 0.00% (480/480 en las 5 semillas)
 ```
+
+### 4.2. Antecedentes Pre-registrados Históricos (v1.0.0-trace)
+
+Los experimentos fundacionales se ejecutaron bajo el protocolo pre-registrado oficial ([Protocolo pre-registrado — Basic-Lite (TRDM-v5), Fase 1.md](Protocolo%20pre-registrado%20%E2%80%94%20Basic-Lite%20(TRDM-v5),%20Fase%201.md)), evaluando 3000 pasos en las 5 semillas oficiales (`42, 123, 456, 789, 999`) y reportados en [results/eval_confirmatorio_5semillas_results.json](results/eval_confirmatorio_5semillas_results.json):
+- Media Test-Comp Full-EM histórica: $5.12\% \pm 4.88\%$ (Máx: $13.33\%$).
+- Scratchpad EM histórica: $81.88\% \pm 10.14\%$.
 
 ### 4.3. Estado Actual, Perfil de Hardware y Limitaciones Conocidas
 
-Basic-Lite TRACE se encuentra en **fase experimental de prueba de concepto (v1.0.0-TRACE)**. La arquitectura está formulada para escalar a modelos masivos, pero los resultados confirmatorios actuales corresponden al prototipo de validación en CPU:
+Basic-Lite TRACE se encuentra en **fase activa de desarrollo (v1.2.0-trace)**, con la **Fase 1 (Convergencia QAT y Calibración) completada** y la **Fase 2 (Motor Nativo C TRACE)** activa:
 
 | Parámetro del Prototipo Evaluado | Valor Medido en Hardware Base (`i3-1115G4`) |
 | :--- | :--- |
 | **Parámetros del checkpoint actual** | ~870K parámetros ($d=192$, $d_{\text{ff}}=384$, 4 expertos MoE + 1 compartido) |
 | **Consumo pico de RAM en evaluación** | < 120 MB en ejecución CPU |
 | **Entorno verificado** | Linux x86_64 (GCC 13+ con OpenMP y AVX2, Python 3.11, PyTorch CPU) |
-| **Limitación principal actual** | Alta varianza entre semillas en Full-EM (`5.12% ± 4.88%`) frente a la alta resolución de subtotales (`81.88%`) |
+| **Avance de optimización clave** | El subajuste severo del estimador STE ha sido superado mediante el schedule QAT BitNet b1.58, elevando el Full-EM del 5.12% histórico al 90.29% en Test-Comp |
 
 ---
 
@@ -245,7 +249,7 @@ python train.py --steps 1000 --batch_size 32 --warmup_ratio 0.40 --device cpu
 > Los binarios y checkpoints (`*.pt`) se encuentran excluidos del control de versiones vía `.gitignore`. El archivo `trace_checkpoint.pt` puede generarse localmente completando el entrenamiento piloto (sección 7.2) o descargarse directamente desde los assets de [GitHub Releases](https://github.com/Miguel19x/Basic-Lite-TRACE/releases).
 >
 > [!WARNING]
-> **Ruptura de compatibilidad estructural (v1.1.0-trace):** Los checkpoints previos de `v1.0.0-trace` (`trace_column_checkpoint.pt`) son incompatibles con la arquitectura actual debido a la migración de `lm_head` de `BitLinear` (con `sub_ln`) a `nn.Linear(d_model, vocab_size, bias=False)` en FP32, el reemplazo de `time_emb` por `stage_emb = nn.Embedding(4, d_model)` para condicionamiento de etapas ($stage\_id \in \{0, 1, 2, 3\}$) y la máscara causal de target unificado `build_target_unified_mask`. Para evaluar `v1.1.0-trace` debe entrenarse un nuevo checkpoint o cargar el artefacto de Fase 2b. Consulta [docs/ROADMAP_TRACE.md](docs/ROADMAP_TRACE.md) y [CHANGELOG.md](CHANGELOG.md).
+> **Compatibilidad estructural (v1.2.0-trace):** Los checkpoints previos de `v1.0.0-trace` (`trace_column_checkpoint.pt`) son incompatibles con la arquitectura actual debido a la migración de `lm_head` a `nn.Linear(d_model, vocab_size, bias=False)` en FP32, el reemplazo de `time_emb` por `stage_emb = nn.Embedding(4, d_model)` para condicionamiento de etapas ($stage\_id \in \{0, 1, 2, 3\}$) y la máscara causal de target unificado `build_target_unified_mask`. Para evaluar el motor actual utilice los checkpoints generados bajo el schedule BitNet b1.58 de Fase 1 (`checkpoints/trace_s*_fase1_bitnet_last.pt`). Consulta [docs/ROADMAP_TRACE.md](docs/ROADMAP_TRACE.md) y [CHANGELOG.md](CHANGELOG.md).
 
 ```bash
 # Evaluar el modelo en la partición reservada test-composicional
