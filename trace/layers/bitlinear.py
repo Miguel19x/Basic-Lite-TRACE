@@ -23,12 +23,21 @@ class BitLinear(nn.Module):
     - Modo entero INT8 con acumulación INT32.
     - Serialización y deserialización BITCOSv2 de 2 bits empaquetados por peso.
     """
-    def __init__(self, in_features: int, out_features: int, eps: float = 1e-6):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        eps: float = 1e-6,
+        use_sub_ln: bool = True,
+        quantize_activations: bool = True,
+    ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.eps = eps
-        self.sub_ln = RMSNorm(in_features, eps=eps)
+        self.use_sub_ln = use_sub_ln
+        self.quantize_activations = quantize_activations
+        self.sub_ln = RMSNorm(in_features, eps=eps) if use_sub_ln else None
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
 
@@ -45,6 +54,20 @@ class BitLinear(nn.Module):
         w_eff = self.weight + (scale_w * q_w - self.weight).detach()
         return w_eff, q_w.detach(), scale_w.detach()
 
+    def get_effective_weight(self) -> torch.Tensor:
+        """Devuelve el tensor de pesos efectivo W_eff (preservando STE en train o caché en eval)."""
+        if self.training:
+            if self.cached_w_eff.numel() > 0:
+                self.cached_w_eff = torch.empty(0, device=self.weight.device)
+            return self.quantize_weights()[0]
+
+        if self.use_loaded_bitcos:
+            return self.int8_codes.to(self.packed_scale.dtype) * self.packed_scale
+
+        if self.cached_w_eff.numel() == 0:
+            self.refresh_eval_cache()
+        return self.cached_w_eff
+
     @torch.no_grad()
     def refresh_eval_cache(self) -> None:
         """Precalcula W_eff y códigos ternarios una sola vez al pasar a eval()."""
@@ -60,7 +83,11 @@ class BitLinear(nn.Module):
         integer_mode: bool = False,
         add_sub_mode: bool = False,
     ) -> torch.Tensor:
-        x_norm = self.sub_ln(x)
+        x_norm = self.sub_ln(x) if (self.sub_ln is not None and self.use_sub_ln) else x
+
+        if not self.quantize_activations:
+            w_eff = self.get_effective_weight()
+            return F.linear(x_norm, w_eff, bias=None)
         q_max = 127.0
         scale_x = x_norm.abs().amax(dim=-1, keepdim=True).clamp(min=self.eps)
 
