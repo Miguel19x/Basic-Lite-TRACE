@@ -140,8 +140,11 @@ class TRACECausalModel(nn.Module):
         z_r = a.clone()
         y_r = torch.zeros_like(a)
 
+        int_mode = getattr(self.cfg, "use_integer_inference", False)
+        add_sub = getattr(self.cfg, "use_add_sub_inference", False)
+
         anchor_feat = self.resident_core.anchor_proj(
-            a, record_telemetry=record_telemetry, integer_mode=False, add_sub_mode=False
+            a, record_telemetry=record_telemetry, integer_mode=int_mode, add_sub_mode=add_sub
         )
 
         active_mask = torch.ones(B, L, 1, device=x_t.device)
@@ -160,8 +163,8 @@ class TRACECausalModel(nn.Module):
                 latent_kv_cache=None,
                 start_pos=0,
                 record_telemetry=(record_telemetry and r == 0),
-                integer_mode=False,
-                add_sub_mode=False,
+                integer_mode=int_mode,
+                add_sub_mode=add_sub,
                 attn_mask=attn_mask,
             )
             z_r, y_r = z_next, y_next

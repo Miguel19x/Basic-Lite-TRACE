@@ -23,6 +23,22 @@ def compile_and_load_ternary_kernel() -> Optional[ctypes.CDLL]:
         return None
 
     curr_dir = Path(__file__).parent.resolve()
+    root_so = curr_dir.parent.parent / "libpaged_gemm.so"
+    if root_so.exists():
+        try:
+            lib = ctypes.CDLL(str(root_so))
+            if hasattr(lib, "ternary_addsub_cpu_kernel"):
+                lib.ternary_addsub_cpu_kernel.argtypes = [
+                    ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p,
+                    ctypes.c_int64, ctypes.c_int64, ctypes.c_int64
+                ]
+                lib.ternary_addsub_cpu_kernel.restype = None
+                _LIB_INSTANCE = lib
+                _KERNEL_AVAILABLE = True
+                return lib
+        except Exception:
+            pass
+
     c_path = curr_dir / "csrc" / "ternary_kernel.c"
     so_path = curr_dir / "libternary.so"
 

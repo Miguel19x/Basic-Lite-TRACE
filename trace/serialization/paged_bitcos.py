@@ -63,11 +63,16 @@ class PagedBitCOSSerializer:
             len_p2 = len(packed_signs)
         else:  # 'fast'
             # Mapeo: -1 -> 0, 0 -> 1, +1 -> 2 (cabe en 2 bits)
-            codes = (flat + 1).astype(np.uint8) & 0x03
-            # Empaquetar 4 pesos por byte
-            padded_len = (num_weights + 3) // 4 * 4
-            if padded_len > num_weights:
-                codes = np.pad(codes, (0, padded_len - num_weights), constant_values=1)
+            # Pauta técnica Fase 2: Alineación estricta por fila a múltiplos de 32 pesos (8 bytes = 1 vector AVX2)
+            padded_cols = ((cols + 31) // 32) * 32
+            if padded_cols > cols:
+                pad_width = padded_cols - cols
+                q_w_padded = np.pad(q_w_chunk, ((0, 0), (0, pad_width)), mode="constant", constant_values=0)
+            else:
+                q_w_padded = q_w_chunk
+
+            flat_padded = q_w_padded.flatten().astype(np.int8)
+            codes = (flat_padded + 1).astype(np.uint8) & 0x03
             b0 = codes[0::4]
             b1 = codes[1::4] << 2
             b2 = codes[2::4] << 4
@@ -128,10 +133,13 @@ class PagedBitCOSSerializer:
 
                 out_f, in_f = codes_np.shape
                 # Calcular cuántas filas caben por página de page_size
-                # En compact, cada peso ocupa ~1.58 bits, redondeamos con margen seguro
-                bytes_per_weight_est = 0.25 if format_type == "compact" else 0.26
-                row_bytes_est = int(in_f * bytes_per_weight_est) + 32
-                rows_per_page = max(1, (page_size - 64) // max(1, int(in_f * 0.25) + 4))
+                if format_type == "fast":
+                    padded_in_f = ((in_f + 31) // 32) * 32
+                    row_bytes = padded_in_f // 4
+                    rows_per_page = max(1, (page_size - 64) // row_bytes)
+                else:
+                    # compact: cada peso ocupa ~1.58 bits, redondeamos con margen seguro
+                    rows_per_page = max(1, (page_size - 64) // max(1, int(in_f * 0.25) + 4))
 
                 tensor_pages = []
                 for r_start in range(0, out_f, rows_per_page):
@@ -336,15 +344,19 @@ class PagedBitCOSReader:
                     scale_val = info["scale"]
                     full_codes = torch.zeros(out_f, in_f, dtype=torch.int8)
 
+                    scales = []
                     for pid in info["page_ids"]:
                         page_bytes = self.read_page_bytes(pid)
                         r_s, r_cnt, _, sc, codes = unpack_page_to_dense(page_bytes)
                         full_codes[r_s : r_s + r_cnt, :] = codes
+                        scales.append(sc)
 
                     module.int8_codes.copy_(full_codes)
+                    scale_val = sum(scales) / len(scales)
                     module.packed_scale.fill_(scale_val)
-                    module.cached_w_eff = full_codes.to(torch.float32) * scale_val
-                    module.weight.data.copy_(module.cached_w_eff)
+                    # Criterio Fase 2: 0 pesos FP32 en RAM para proyecciones BitLinear
+                    module.cached_w_eff = torch.empty(0)
+                    module.weight = nn.Parameter(torch.empty(0), requires_grad=False)
                     module.use_loaded_bitcos = True
                     loaded_bitlinear += 1
 

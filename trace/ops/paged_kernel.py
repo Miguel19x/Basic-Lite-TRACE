@@ -34,10 +34,10 @@ def unpack_page_to_dense(page_bytes: bytes) -> Tuple[int, int, int, float, torch
 
         reconstructed = np.zeros(total_weights, dtype=np.int8)
         reconstructed[presence == 1] = np.where(signs == 1, 1, -1).astype(np.int8)
-    else:  # fast: 2 bits directos por peso
+    else:  # fast: 2 bits directos por peso (filas alineadas a múltiplos de 32 pesos)
+        padded_cols = ((cols + 31) // 32) * 32
         packed_bytes = page_bytes[offset : offset + len_p1]
         packed_arr = np.frombuffer(packed_bytes, dtype=np.uint8)
-        # Extraer los 4 valores de cada byte
         c0 = (packed_arr & 0x03).astype(np.int8) - 1
         c1 = ((packed_arr >> 2) & 0x03).astype(np.int8) - 1
         c2 = ((packed_arr >> 4) & 0x03).astype(np.int8) - 1
@@ -47,7 +47,7 @@ def unpack_page_to_dense(page_bytes: bytes) -> Tuple[int, int, int, float, torch
         reconstructed[1::4] = c1
         reconstructed[2::4] = c2
         reconstructed[3::4] = c3
-        reconstructed = reconstructed[:total_weights]
+        reconstructed = reconstructed.reshape(rows, padded_cols)[:, :cols].copy()
 
     codes_tensor = torch.from_numpy(reconstructed.reshape(rows, cols))
     return row_start, rows, cols, scale_w, codes_tensor

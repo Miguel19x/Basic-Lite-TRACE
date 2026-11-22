@@ -1,7 +1,7 @@
 # Basic-Lite TRACE — Manifiesto de Versión y Criptografía (RELEASE_MANIFEST)
 
 **Proyecto:** Basic-Lite TRACE  
-**Versión Documentada:** TRACE 1.2.0 (Convergencia QAT BitNet b1.58 y Cierre de Fase 1)  
+**Versión Documentada:** TRACE 1.3.0 (Motor Autónomo C, Paged BitCOS v1, AVX2 Fisionado y Cierre de Fase 2)  
 **Fecha de corte:** 22 de noviembre de 2026  
 **Titular y Custodio:** Miguel19x (`miguelaranguren19x@outlook.com`)  
 
@@ -20,9 +20,9 @@
 
 ---
 
-## 2. Hashes Criptográficos SHA-256 de Archivos Fuente y Artefactos Clave (Versión Consolidada v1.2.0)
+## 2. Hashes Criptográficos SHA-256 de Archivos Fuente y Artefactos Clave (Versión Consolidada v1.3.0)
 
-Los siguientes hashes han sido generados mediante el algoritmo estándar SHA-256 sobre el contenido exacto de los archivos consolidados de la versión 1.2.0:
+Los siguientes hashes han sido generados mediante el algoritmo estándar SHA-256 sobre el contenido exacto de los archivos consolidados de la versión 1.3.0:
 
 | Archivo Fuente / Artefacto | Hash Criptográfico SHA-256 |
 | :--- | :--- |
@@ -33,11 +33,15 @@ Los siguientes hashes han sido generados mediante el algoritmo estándar SHA-256
 | `AUTHORS.md` | `2c7a099203dfdc56a25bb1eea549bce129600039d53ce9ff52b3ee24dc39d84c` |
 | `CHANGELOG.md` | `27d9222c1723a60e8279e761cdc325f671fe216ef35b1c65baa3f877f39b1b17` |
 | `THIRD_PARTY_NOTICES.md` | `0aa1c14c11e32027a936a366616dafea6139ef02a619d19c861503784fc238c9` |
+| `Makefile` | `aeeba40778b361613402cd75a6b4ccb7d48bf08fdaf352b4f8ab0c76f601cfae` |
 | `config.py` | `8fa667b11da6f570e35b3ea6fd965cbdb4882edf4258dce2bfb7ee615b75c3be` |
 | `train.py` | `4533971960c5f7b9e76ff7c2a354466bdc2feb1df43163dbd885087ae9aebd2d` |
 | `eval.py` | `db11f0ee132c9156489c34e84f864de6c58663c2ae20718605bc520346efdf03` |
 | `data.py` | `378c9178d28c9132683da925e7e97eab2376565698e57f159cfdea03a34675ef` |
-| `paged_gemm_kernel.c` | `ff4fac91f34428c0bb1c90c99a85b99b19a9792814385a013cba15bc1348d228` |
+| `export_paged.py` | `5d8ed1cee48c32bafce39c59747b41cbb73c5b64d958a2cf24b3b8fc6cc5bbed` |
+| `paged_gemm_kernel.c` | `f5e9569e32b9379486b40fff5424e0bf1d105f0e76e85f5586eb5c8fdb2187c9` |
+| `trace_infer.c` | `0f62f8186399dde61f0cf238e1df5e588c19c205694526f9bcb899867a193ffe` |
+| `trace_infer.h` | `d20c645d3bf6eb410d90c48b9601c35005f2e6733be4927455f0a7cf961bc9f4` |
 | `results/eval_confirmatorio_5semillas_results.json` | `bf7c8890a1b46dfa7db89d3a6647e1cd64c0f1594d540569f058dad3c1dcc446` |
 | `results/e0_higiene_results.json` | `91c1fc2c55bff3f51dd6632db27f8e537eb9691c8376a5b2d23b42d87b0709dc` |
 | `results/e1_confirmatorio_5semillas_results.json` | `4729c36ee1a0b2bd2505c7d3cf66409b75eb97b63f90291a63d5e7431f9d9d36` |
@@ -51,19 +55,31 @@ Los siguientes hashes han sido generados mediante el algoritmo estándar SHA-256
 | `trace/core/context_manager.py` | `96e134bc6bb5a7e851e7068c92aea0636b15ed318432ce4a21892fed3d214287` |
 | `trace/core/weight_manager.py` | `500208a0429122dddbdb9d7f58df23af1ceec537c63a5621ecfa8be0794c9bac` |
 | `trace/layers/abacus.py` | `f8c12469b63ac07849a4253a6c3a16e4775855733bf10d2d37725b6ced3b6baf` |
-| `trace/layers/bitlinear.py` | `cd783d92bf48beae204fcbe53ffe5beecc1ef8d54c91d06391b27fa6565c1e4b` |
+| `trace/layers/bitlinear.py` | `74ee510c04fb4c285bb5b184df597980f1af8dec3dc0bdcd2b1d3529a92d361a` |
 | `trace/layers/byte_patcher.py` | `ae00d6e40bc81358c21e948b73d48df385f612857dbbf778796564afe8f2f1f1` |
-| `trace/models/causal.py` | `1469db9af9726d5f36b859d8d3a7a461b13821e4f5117cfd6531951a61974e08` |
+| `trace/layers/norm.py` | `1aa6c7f3644172c5090ce172a67391e61d9690f7ff0d4d06e734abc62fbbea13` |
+| `trace/models/causal.py` | `2607970610d5cfa23d7d4583a0976ab599eb73eb3cbff417522b5da78355cec4` |
 | `trace/modules/attention.py` | `66f40651d25a530f721f1a8889bfc61f4768ff9cedff5ae419eb58aab9492ac8` |
 | `trace/modules/paged_moe.py` | `b61af0d57408a621b9e264c2e03d6fdd2899d3a6080d9add852476d42aa343ef` |
 | `trace/modules/mla_attention.py` | `1520ee69177ff27a1889bbc47b3d15b854e4554be6f7a440dbcd72b3a9defb6d` |
 | `trace/modules/resident_core.py` | `b81bbd22fa6819ae9f5e08f022b8ae464160c58c5e9ced9688d73e596ac94791` |
-| `trace/serialization/paged_bitcos.py` | `f873cdc079cd478e3dd7022f7ce93175069a237ab5418b0c08d59eb873f5cdda` |
+| `trace/ops/paged_kernel.py` | `ec87f753749e2e1a9b20817313226a260139799bca2af2696e621b7d0430f8bb` |
+| `trace/ops/ternary_cpu.py` | `5334a6c1f12a5a52db726242784d6e094ebcbb5d0bd4a8aafb51197fc5d0a2e4` |
+| `trace/serialization/paged_bitcos.py` | `2709b0a29284a8ba79078a3b374ea4a82b086b2b760972d31e370b926af61f1a` |
+| `tests/test_paged_bitcos.py` | `24eb4a148b91cf05ae9fdb7afb51fcb42d525cdc198a33f0180f5b4970f4b602` |
+| `tests/test_avx2_kernel.py` | `85fac2c04ad1e01daafc12259b8471713b726bc7c86e927aadf7476dcaec9ec1` |
+| `tests/test_parity_and_falsification.py` | `e122b20967e91ba9d4efbddec192222ed5918ce12131c426c36e65b70562a6ea` |
+| `tests/test_trace_infer.py` | `3f291d4335fda3ef5cbff6d31459e54fc249b640cdef5c22a02ee6a12efd9920` |
+| `tests/test_benchmark_fase2.py` | `a1863a61d98a3632c2b1c95626088c8484f27811100e328bf3c88d1d84d134e9` |
+| `tests/test_smoke.py` | `cf0ac0e331bf71bbfbe712c5a04f558b6660bfc016adabc99eb7fd07938347e3` |
+| `tests/test_e0_hygiene.py` | `19dd184b0290ef88773c3fc1a8bfb31bbb51ff25b65464ba3c819021f4142ecc` |
+| `tests/test_scalability_flags.py` | `78fa980271e1c154bb947f82b702fda0d2c02b2032bbeca5be0d986c8c1fd9df` |
 | `docs/PAPER_TECNICO_BASIC_LITE.md` | `e07e22f996979bfd8dc252507676e74656c7d4f5e93a1718c1711100bb29b1de` |
 | `docs/PROJECT_IDENTITY.md` | `4cc4138fabd8b8dc9ee85d8006f93b5a0c1ee538500d99ca1626161b79b65bcd` |
 | `docs/AI_ASSISTANCE.md` | `f17475ef92cb4e563f53afb5067705112a535abe1daafe4708b897e88f505db8` |
 | `docs/PROVENANCE.md` | `fc563b48a81669ae3ba86f8b26d1009877478b58055fcf50184712d5ad12a766` |
-| `docs/ROADMAP_TRACE.md` | `db9d46b2f57714722c39d6ec3ea907e500bb99d7e0684dcbafe7fa5a720bf367` |
+| `docs/ROADMAP_TRACE.md` | `6de7ea4061c108b176fe0dd819e7763c4ce319fd4efc66711219d6a151fb4e93` |
+| `docs/ROADMAP_POST_FASE5.md` | `61ca2b65c1ff1bf63310001ec572760dff4cdd99ac9a6e7681d4a3e5e7970c77` |
 
 ---
 

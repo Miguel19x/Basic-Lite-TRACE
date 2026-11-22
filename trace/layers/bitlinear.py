@@ -68,6 +68,17 @@ class BitLinear(nn.Module):
         if not self.training:
             q_x = torch.clamp(torch.round(x_norm * (q_max / scale_x)), -q_max, q_max)
 
+            # Blindaje para modelo cargado desde Paged BitCOS (0 pesos FP32 en RAM)
+            if self.use_loaded_bitcos:
+                if add_sub_mode:
+                    acc_int32 = ternary_addsub_matmul(q_x.to(torch.int8), self.int8_codes)
+                    return acc_int32.to(x.dtype) * ((scale_x / q_max) * self.packed_scale)
+                # Tanto para integer_mode como para evaluación por defecto
+                q_x_int = q_x.to(torch.int32)
+                w_codes_int = self.int8_codes.to(torch.int32)
+                acc_int32 = torch.matmul(q_x_int, w_codes_int.t())
+                return acc_int32.to(x.dtype) * ((scale_x / q_max) * self.packed_scale)
+
             if add_sub_mode:
                 if self.cached_w_eff.numel() == 0:
                     self.refresh_eval_cache()
@@ -75,7 +86,9 @@ class BitLinear(nn.Module):
                 acc_int32 = ternary_addsub_matmul(q_x.to(torch.int8), self.int8_codes)
                 return acc_int32.to(x.dtype) * ((scale_x / q_max) * self.packed_scale)
 
-            if integer_mode or self.use_loaded_bitcos:
+            if integer_mode:
+                if self.cached_w_eff.numel() == 0:
+                    self.refresh_eval_cache()
                 q_x_int = q_x.to(torch.int32)
                 w_codes_int = self.int8_codes.to(torch.int32)
                 acc_int32 = torch.matmul(q_x_int, w_codes_int.t())

@@ -11,6 +11,7 @@ __pycache__/
 # C++ build artifacts
 *.o
 *.so
+trace_infer
 .ninja*
 
 # Checkpoints y binarios de modelos
