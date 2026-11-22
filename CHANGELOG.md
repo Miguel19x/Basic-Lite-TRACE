@@ -4,6 +4,30 @@ Todas las modificaciones, versiones y evoluciones arquitectónicas de **Basic-Li
 
 ---
 
+## [TRACE-1.2.0] — Convergencia QAT BitNet b1.58 y Calibración — 2026-11-22
+
+### Añadido y Consolidado
+* **Resultados Empíricos Consolidados de Fase 1 (Exploratorio, post-prereg-v1, §9.4):**
+  - Registro formal del artefacto canónico `results/eval_fase1_bitnet_5semillas_results.json` evaluando los checkpoints finales al paso 6000 (`_last.pt`) en CPU:
+    - Test-Composicional Full-EM: media **$90.29\%$** (DE $13.44\%$, mediana $95.21\%$, IC95 bootstrap $[78.04\%, 97.29\%]$, pico $98.96\%$ en Semilla 456).
+    - Ganancia neta de **$+71.25$ puntos porcentuales** sobre la línea base de Fase 2b ($19.04\% \to 90.29\%$).
+    - Exact Match Scratchpad Etapa 1 ($P_w, P_{ms}$): **$100.00\% \pm 0.00\%$** en las 5 semillas (480/480).
+    - Train-200 Full-EM (sin reemplazo, semilla 42): media **$99.70\% \pm 0.27\%$**.
+    - Exactitud en dígitos aislados: **$98.94\% \pm 1.58\%$**.
+    - Calibración Expected Calibration Error (ECE): media global **$0.61\%$** y Etapa 2 **$1.22\%$**. Entre el **$95.85\%$** y el **$99.88\%$** de las predicciones se ubicaron en la banda de alta confianza ($\ge 0.85$) con una exactitud observada de **$98.03\%$ a $99.95\%$** (media agregada: $98.96\%$ de cobertura a $99.41\%$ de exactitud).
+  - Registro complementario de trazabilidad en `results/eval_fase1_5semillas_results.json` evaluando los picos intermedios de DEV (media Test-Comp $89.58\%$).
+* **Schedule QAT de 2 Etapas estilo BitNet b1.58:**
+  - Rampa lineal de LR en 300 pasos hacia $lr=1.0\text{e-}3$ con decaimiento coseno a $1.5\text{e-}4$ en 6000 pasos.
+  - Decaimiento de peso desacoplado en 3 grupos de parámetros en `configure_adamw_groups()`: `weight_decay=0.05` en *shadow weights* de `BitLinear` durante la primera mitad (pasos 1-3000) descendiendo a `0.0` en la segunda mitad (pasos 3001-6000), manteniendo normas y embeddings en `0.0`.
+  - Telemetría de saturación de activaciones (`act_saturation`) y tasa de cambio de signo ternario (`code_flip_rate`) integrada en `train.py`.
+  - Calibración desacoplada de Etapa 2 (`stage2_ece_pct` en dígitos 6:12) integrada en `eval.py`.
+* **Diagnóstico Causal y Lección Metodológica:**
+  - Refutación empírica de la hipótesis de techo representacional: El estancamiento histórico de W1.58A8 respondía principalmente a subajuste de optimización bajo el estimador STE con hiperparámetros estándar de FP32. Al adaptar el schedule QAT de BitNet b1.58, el rendimiento saltó del 19.04% al 90.29%, aunque persiste varianza residual en la Semilla 123 (66.46%).
+* **Gobernanza y Roadmap:**
+  - Certificación formal y cierre de la **Fase 1** (`COMPLETADA`) y apertura de la **Fase 2** (`ACTIVA`: Motor Nativo C TRACE en i3-1115G4).
+
+---
+
 ## [TRACE-1.1.0] — Desbloqueo Aritmético y Causalidad Decimal — 2026-11-21
 
 ### ⚠️ Ruptura de Compatibilidad (Breaking Changes)

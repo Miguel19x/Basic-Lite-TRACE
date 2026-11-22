@@ -46,8 +46,8 @@ flowchart TD
 | Fase | Título | Ámbito | Estado | Puerta de Salida |
 |---|---|---|:---:|---|
 | **Fase 0** | Cierre de Higiene y Línea Base | Local (CPU) | **COMPLETADA** | 3 suites en verde, E0.1=0.0, E0.3=0.0, 0 discrepancias SHA-256 |
-| **Fase 1** | Convergencia QAT y Calibración | Colab (GPU) | **ACTIVA** | 5 semillas Train-200 >90%, Test-Comp EM >60%, ECE registrado |
-| **Fase 2** | Motor Nativo C TRACE | Local (i3-1115G4) | **CONGELADA** | Paridad $\le 1\text{e-}4$, test falsación OK, 0 FP32 en RAM, $\ge 3\times$ speedup |
+| **Fase 1** | Convergencia QAT y Calibración | Colab (GPU) | **COMPLETADA** | 5 semillas Train-200 >90%, Test-Comp EM >60%, ECE registrado |
+| **Fase 2** | Motor Nativo C TRACE | Local (i3-1115G4) | **ACTIVA** | Paridad $\le 1\text{e-}4$, test falsación OK, 0 FP32 en RAM, $\ge 3\times$ speedup |
 | **Fase 3** | TRACELanguageModel (15M-50M) | Colab / Local | **CONGELADA** | Texto coherente en `trace_infer.c` a $>25$ tok/s en 2 hilos CPU |
 | **Fase 4** | Pesos Abiertos 2-bit en Motor C | Local (i3-1115G4) | **CONGELADA** | Perplejidad $\pm 1\%$ vs binario oficial de referencia |
 | **Fase 5** | Residencia Selectiva y Agente | Local (i3-1115G4) | **CONGELADA** | MoE $>16$ GB paginado NVMe + Multi-token drafting + SQLite L3 |
@@ -65,11 +65,11 @@ flowchart TD
   5. Fusionar `exp/arithmetic-unblock` $\to$ `main`, documentar ruptura de compatibilidad con checkpoint `v1.0.0-trace` en `README.md` y `CHANGELOG.md`, actualizar `docs/RELEASE_MANIFEST.md` y preparar tag `v1.1.0-trace`.
 - **Puerta de salida:** 3 suites en verde, $E0.1 = 0.0$, $E0.3 = 0.0$, 0 discrepancias de hashes SHA-256 en el manifiesto.
 
-### [FASE 1 — ACTIVA] Convergencia QAT y Calibración (870K, Colab GPU)
+### [FASE 1 — COMPLETADA] Convergencia QAT y Calibración (870K, Colab GPU)
 - **Alcance:** Diagnóstico rápido de perfiles en train sobre Semilla 999; schedule BitNet de 2 etapas en `train.py` (6000 pasos, warmup fijo 1200, lr pico $1.0\text{e-}3 \to 1.5\text{e-}4$, weight decay moderado en shadow weights Etapa 1 $\to$ 0.0 Etapa 2); ablación aislada A/B de Muon/NorMuon en matrices 2D de BitLinear (Semillas 123 y 999); telemetría de `act_saturation` en `BitLinear` (y solo si satura, ablación de compuerta sigmoide por cabeza); métrica ECE en `eval.py`; RLVR/GRPO opcional post-SFT.
 - **Puerta de salida:** 5 semillas con Train-200 EM $>90\%$, media Test-Comp EM $>60\%$, calibración ECE registrada.
 
-### [FASE 2 — CONGELADA] Motor Nativo C (Paged BitCOS v1 + AVX2 + O_DIRECT, CPU i3)
+### [FASE 2 — ACTIVA] Motor Nativo C (Paged BitCOS v1 + AVX2 + O_DIRECT, CPU i3)
 - **Alcance:** Eliminar tensores FP32 redundantes en `PagedBitCOSReader.load_into_model`; conectar `use_add_sub_inference` en `TRACECausalModel`; eliminar sesgos (`bias=False`) en `noise_mlp` y `halt_gate`; alinear filas fast a múltiplos de 16 pesos; crear `export_paged.py`; implementar AVX2 real (I2_S con `_mm256_maddubs_epi16`, luego TL2 LUT con PSHUFB) en `paged_gemm_kernel.c` con soporte $M=1..8$ y `omp_set_num_threads(2)`; crear runner C autónomo `trace_infer.c` (RAM alineada $\le 16$ GB y módulo `O_DIRECT` 4-16 MiB para escalado).
 - **Puerta de salida:** Paridad numérica $\le 1\text{e-}4$ vs PyTorch, test de falsación superado, cero tensores FP32 de pesos en RAM, $\ge 3\times$ aceleración en i3-1115G4.
 
