@@ -243,6 +243,9 @@ python train.py --steps 1000 --batch_size 32 --warmup_ratio 0.40 --device cpu
 
 > [!NOTE]
 > Los binarios y checkpoints (`*.pt`) se encuentran excluidos del control de versiones vía `.gitignore`. El archivo `trace_checkpoint.pt` puede generarse localmente completando el entrenamiento piloto (sección 7.2) o descargarse directamente desde los assets de [GitHub Releases](https://github.com/Miguel19x/Basic-Lite-TRACE/releases).
+>
+> [!WARNING]
+> **Ruptura de compatibilidad estructural (v1.1.0-trace):** Los checkpoints previos de `v1.0.0-trace` (`trace_column_checkpoint.pt`) son incompatibles con la arquitectura actual debido a la migración de `lm_head` de `BitLinear` (con `sub_ln`) a `nn.Linear(d_model, vocab_size, bias=False)` en FP32, el reemplazo de `time_emb` por `stage_emb = nn.Embedding(4, d_model)` para condicionamiento de etapas ($stage\_id \in \{0, 1, 2, 3\}$) y la máscara causal de target unificado `build_target_unified_mask`. Para evaluar `v1.1.0-trace` debe entrenarse un nuevo checkpoint o cargar el artefacto de Fase 2b. Consulta [docs/ROADMAP_TRACE.md](docs/ROADMAP_TRACE.md) y [CHANGELOG.md](CHANGELOG.md).
 
 ```bash
 # Evaluar el modelo en la partición reservada test-composicional

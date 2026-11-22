@@ -125,7 +125,7 @@ class HybridConfig:
 
     # Optimización AdamW (decaimiento desacoplado)
     batch_size: int = 16
-    learning_rate: float = 2.0e-3
+    learning_rate: float = 3.0e-4
     weight_decay: float = 0.03
     betas: tuple = (0.9, 0.95)
     max_steps: int = 800             # Presupuesto ampliado para consolidar aritmética
@@ -133,4 +133,7 @@ class HybridConfig:
     grad_clip: float = 1.0
     checkpoint_path: str = "trace_checkpoint.pt"
     bitcos_export_path: str = "trace_paged_bitcos.bin"
+
+    def __post_init__(self) -> None:
+        self.archive_context_enabled = self.enable_sqlite_context_l3
 

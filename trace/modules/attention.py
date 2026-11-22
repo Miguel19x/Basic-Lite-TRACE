@@ -3,7 +3,7 @@
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,6 +19,40 @@ def build_block_causal_mask(seq_len: int, block_size: int, device: torch.device)
     block_id = idx // block_size
     allowed = block_id.unsqueeze(0) <= block_id.unsqueeze(1)
     return allowed.unsqueeze(0).unsqueeze(0)
+
+
+def build_target_unified_mask(
+    prompt_lens: List[int],
+    max_seq_len: int,
+    block_size: int,
+    device: torch.device,
+    target_len: int = 35,
+) -> torch.Tensor:
+    """
+    Construye máscara causal con región de target unificada [B, 1, L, L]:
+    1. Región de Prompt (0..plen-1): causalidad estricta por bloques (block_size=16).
+       Los tokens del prompt nunca pueden atender a la región de respuesta (target).
+    2. Región de Target (plen..plen+target_len-1): bloque unificado bidireccional.
+       Cualquier dígito de respuesta (centenas, decenas, unidades de pw, pms, watt, ms)
+       puede atender bidireccionalmente a todos los demás dígitos del target
+       y a todos los tokens del prompt previo, eliminando el corte causal de acarreos.
+    3. Región post-target (PAD): no atiende hacia adelante.
+    """
+    B = len(prompt_lens)
+    L = max_seq_len
+    idx = torch.arange(L, device=device)
+    block_id = idx // block_size
+
+    base_mask = (block_id.unsqueeze(0) <= block_id.unsqueeze(1)).unsqueeze(0).repeat(B, 1, 1)
+
+    for b in range(B):
+        plen = prompt_lens[b]
+        t_end = min(L, plen + target_len)
+        base_mask[b, :plen, plen:] = False
+        base_mask[b, plen:t_end, :t_end] = True
+        base_mask[b, plen:t_end, t_end:] = False
+
+    return base_mask.unsqueeze(1)
 
 
 class BlockCausalGQATernaryAttention(nn.Module):
@@ -72,6 +106,7 @@ class BlockCausalGQATernaryAttention(nn.Module):
         record_telemetry: bool = False,
         integer_mode: bool = False,
         add_sub_mode: bool = False,
+        attn_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         B, L, D = x.shape
         q = self.q_proj(x, record_telemetry, integer_mode, add_sub_mode).view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
@@ -98,8 +133,8 @@ class BlockCausalGQATernaryAttention(nn.Module):
         if kv_cache is not None:
             attn_out = F.scaled_dot_product_attention(q, k_exp, v_exp, is_causal=False)
         else:
-            attn_mask = self._get_block_mask(L, x.device)
-            attn_out = F.scaled_dot_product_attention(q, k_exp, v_exp, attn_mask=attn_mask)
+            eff_mask = attn_mask if attn_mask is not None else self._get_block_mask(L, x.device)
+            attn_out = F.scaled_dot_product_attention(q, k_exp, v_exp, attn_mask=eff_mask)
 
         attn_out = attn_out.transpose(1, 2).contiguous().view(B, L, D)
         out = self.o_proj(attn_out, record_telemetry, integer_mode, add_sub_mode)

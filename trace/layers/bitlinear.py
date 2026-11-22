@@ -36,8 +36,6 @@ class BitLinear(nn.Module):
         self.register_buffer("int8_codes", torch.zeros(out_features, in_features, dtype=torch.int8), persistent=False)
         self.register_buffer("packed_scale", torch.tensor(1.0, dtype=torch.float32), persistent=False)
         self.register_buffer("cached_w_eff", torch.empty(0), persistent=False)
-        self.register_buffer("cached_pos_mask", torch.empty(0), persistent=False)
-        self.register_buffer("cached_neg_mask", torch.empty(0), persistent=False)
         self.register_buffer("prev_codes", torch.zeros(out_features, in_features, dtype=torch.int8), persistent=False)
         self.use_loaded_bitcos: bool = False
         self.last_stats: Dict[str, float] = {}
@@ -50,13 +48,11 @@ class BitLinear(nn.Module):
 
     @torch.no_grad()
     def refresh_eval_cache(self) -> None:
-        """Precalcula W_eff, códigos ternarios y máscaras de signo una sola vez al pasar a eval()."""
+        """Precalcula W_eff y códigos ternarios una sola vez al pasar a eval()."""
         w_eff, q_w, scale_w = self.quantize_weights()
         self.cached_w_eff = w_eff.detach().clone()
         self.int8_codes.copy_(q_w.to(torch.int8))
         self.packed_scale.fill_(float(scale_w.item()))
-        self.cached_pos_mask = (self.int8_codes == 1).to(torch.float32)
-        self.cached_neg_mask = (self.int8_codes == -1).to(torch.float32)
 
     def forward(
         self,
@@ -73,7 +69,7 @@ class BitLinear(nn.Module):
             q_x = torch.clamp(torch.round(x_norm * (q_max / scale_x)), -q_max, q_max)
 
             if add_sub_mode:
-                if self.cached_pos_mask.numel() == 0:
+                if self.cached_w_eff.numel() == 0:
                     self.refresh_eval_cache()
                 # Inferencia aditiva pura vía kernel nativo C OpenMP/AVX2
                 acc_int32 = ternary_addsub_matmul(q_x.to(torch.int8), self.int8_codes)
@@ -138,7 +134,5 @@ class BitLinear(nn.Module):
         self.int8_codes.copy_(codes)
         self.packed_scale.fill_(scale_val)
         self.cached_w_eff = self.int8_codes.to(torch.float32) * scale_val
-        self.cached_pos_mask = (self.int8_codes == 1).to(torch.float32)
-        self.cached_neg_mask = (self.int8_codes == -1).to(torch.float32)
         self.use_loaded_bitcos = True
         return next_offset
