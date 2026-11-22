@@ -7,6 +7,7 @@ from trace.layers.norm import RMSNorm
 from trace.layers.rotary import RotaryEmbedding
 from trace.layers.embeddings import SinusoidalStepEncoding
 from trace.layers.bitlinear import BitLinear
+from trace.layers.ffn import TernaryExpert
 from trace.layers.abacus import AbacusEmbedding, extract_abacus_ranks
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     "RotaryEmbedding",
     "SinusoidalStepEncoding",
     "BitLinear",
+    "TernaryExpert",
     "AbacusEmbedding",
     "extract_abacus_ranks",
 ]

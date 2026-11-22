@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from trace.core.types import ModelOutput
 from trace.layers.abacus import AbacusEmbedding
 from trace.layers.bitlinear import BitLinear
 from trace.layers.norm import RMSNorm
@@ -131,7 +130,7 @@ class TRACECausalModel(nn.Module):
             L = L_trim
 
         R = num_recursions if num_recursions is not None else self.cfg.num_recursions
-        delta_t = torch.full_like(t_noise, 1.0 / max(1, self.cfg.diffusion_steps_per_block))
+        delta_t = torch.full_like(t_noise, getattr(self.cfg, "delta_t_val", 0.25))
 
         # Incrustación combinada con Abacus y Condicionamiento de Etapa
         a = self.compute_input_embeddings(x_t)

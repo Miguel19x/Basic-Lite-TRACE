@@ -1,34 +1,41 @@
 CC ?= gcc
-CFLAGS ?= -O3 -mavx2 -mfma -ffp-contract=off -fopenmp -Wall -Wextra -shared -fPIC
-EXE_CFLAGS ?= -O3 -mavx2 -mfma -ffp-contract=off -fopenmp -Wall -Wextra
+CFLAGS ?= -O3 -mavx2 -mfma -ffp-contract=off -fopenmp -Wall -Wextra -Werror -shared -fPIC
+EXE_CFLAGS ?= -O3 -mavx2 -mfma -ffp-contract=off -fopenmp -Wall -Wextra -Werror
 TARGET = libpaged_gemm.so
 LIBTERNARY = trace/ops/libternary.so
 RUNNER_LIB = libtrace_infer.so
 RUNNER_BIN = trace_infer
-SRC = paged_gemm_kernel.c
-RUNNER_SRC = trace_infer.c
+
+GEMM_SRC = csrc/paged_gemm.c
+INFER_SRCS = csrc/trace_loader.c csrc/trace_causal.c $(GEMM_SRC)
+HEADERS = csrc/trace_infer.h csrc/trace_math.h
 PYTHON ?= $(shell if [ -f venv/bin/python ]; then echo venv/bin/python; else echo python3; fi)
 
-.PHONY: all clean test
+.PHONY: all clean test lint check
 
 all: $(TARGET) $(LIBTERNARY) $(RUNNER_LIB) $(RUNNER_BIN)
 
-$(TARGET): $(SRC)
+$(TARGET): $(GEMM_SRC) $(HEADERS)
 	$(CC) $(CFLAGS) $< -o $@
 
 $(LIBTERNARY): $(TARGET)
 	cp $< $@
 
-$(RUNNER_LIB): $(RUNNER_SRC) $(SRC)
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+$(RUNNER_LIB): $(INFER_SRCS) $(HEADERS)
+	$(CC) $(CFLAGS) -o $@ $(INFER_SRCS) -lm
 
-$(RUNNER_BIN): $(RUNNER_SRC) $(SRC)
-	$(CC) $(EXE_CFLAGS) -DTRACE_INFER_MAIN -o $@ $^ -lm
+$(RUNNER_BIN): $(INFER_SRCS) $(HEADERS)
+	$(CC) $(EXE_CFLAGS) -DTRACE_INFER_MAIN -o $@ $(INFER_SRCS) -lm
 
 test: all
 	PYTHONPATH=. $(PYTHON) tests/test_smoke.py
 	PYTHONPATH=. $(PYTHON) tests/test_avx2_kernel.py
 	PYTHONPATH=. $(PYTHON) tests/test_trace_infer.py
+
+lint:
+	@if [ -f venv/bin/ruff ]; then venv/bin/ruff check .; else echo "ruff no instalado en venv, omitiendo linting"; fi
+
+check: lint test
 
 clean:
 	rm -f $(TARGET) $(LIBTERNARY) $(RUNNER_LIB) $(RUNNER_BIN)

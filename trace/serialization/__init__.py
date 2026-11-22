@@ -3,16 +3,12 @@
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
-from trace.serialization.bitcos import (
-    pack_bitlinear_layer,
-    unpack_bitlinear_layer,
-    export_bitcos_archive,
-    load_bitcos_archive,
+from trace.serialization.paged_bitcos import (
+    PagedBitCOSSerializer,
+    PagedBitCOSReader,
 )
 
 __all__ = [
-    "pack_bitlinear_layer",
-    "unpack_bitlinear_layer",
-    "export_bitcos_archive",
-    "load_bitcos_archive",
+    "PagedBitCOSSerializer",
+    "PagedBitCOSReader",
 ]

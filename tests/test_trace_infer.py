@@ -84,7 +84,7 @@ def test_native_c_engine_odirect_and_parity():
 
     assert used_odirect == 1, "Violación: O_DIRECT no se activó sobre el almacenamiento NVMe."
     assert pages_offset % 4096 == 0, f"Violación: pages_offset ({pages_offset}) no está alineado a 4096 bytes."
-    assert pread_calls_cold > 0, "Violación: no se registraron llamadas pread durante la carga fría."
+    assert pread_calls_cold >= 2, f"Violación: pread_calls ({pread_calls_cold}) debe ser >= 2 (cabecera + pool contiguo)."
 
     # 3. Cargar referencia PyTorch con use_add_sub_inference=True
     torch.set_num_threads(2)

@@ -5,14 +5,13 @@
 
 import math
 from typing import Dict, Optional, Tuple
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from trace.layers.norm import RMSNorm
 from trace.ops.ternary_cpu import ternary_addsub_matmul
-from trace.serialization.bitcos import pack_bitlinear_layer, unpack_bitlinear_layer
+
 
 
 class BitLinear(nn.Module):
@@ -37,8 +36,8 @@ class BitLinear(nn.Module):
         self.register_buffer("packed_scale", torch.tensor(1.0, dtype=torch.float32), persistent=False)
         self.register_buffer("cached_w_eff", torch.empty(0), persistent=False)
         self.register_buffer("prev_codes", torch.zeros(out_features, in_features, dtype=torch.int8), persistent=False)
-        self.use_loaded_bitcos: bool = False
         self.last_stats: Dict[str, float] = {}
+        self.use_loaded_bitcos: bool = False
 
     def quantize_weights(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         scale_w = self.weight.abs().mean().clamp(min=self.eps)
@@ -129,23 +128,3 @@ class BitLinear(nn.Module):
                 }
 
         return F.linear(x_eff, w_eff, bias=None)
-
-    @torch.no_grad()
-    def export_bitcos_bytes(self) -> bytes:
-        _, q_w, scale_w = self.quantize_weights()
-        return pack_bitlinear_layer(
-            self.out_features,
-            self.in_features,
-            float(scale_w.item()),
-            q_w,
-        )
-
-    @torch.no_grad()
-    def load_from_bitcos_bytes(self, blob: bytes, offset: int = 0) -> int:
-        out_f, in_f, scale_val, codes, next_offset = unpack_bitlinear_layer(blob, offset)
-        assert out_f == self.out_features and in_f == self.in_features, "Dimensiones incompatibles"
-        self.int8_codes.copy_(codes)
-        self.packed_scale.fill_(scale_val)
-        self.cached_w_eff = self.int8_codes.to(torch.float32) * scale_val
-        self.use_loaded_bitcos = True
-        return next_offset

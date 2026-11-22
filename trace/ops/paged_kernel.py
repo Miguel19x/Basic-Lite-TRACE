@@ -5,7 +5,7 @@
 
 import struct
 import time
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 import numpy as np
 import torch
 

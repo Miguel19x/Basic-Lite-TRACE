@@ -3,12 +3,9 @@
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
-import math
-import os
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
-import torch.nn as nn
 
 
 class HierarchicalContextManager:
@@ -16,7 +13,7 @@ class HierarchicalContextManager:
     Administrador explícito de información contextual jerárquica en 3 niveles:
     - Nivel 1 (Activo): Ventana reciente y fragmentos recuperados en RAM para atención directa.
     - Nivel 2 (Comprimido): Representaciones latentes de segmentos pasados (guía y orientación).
-    - Nivel 3 (Archivo): Contenido original exacto almacenado de forma persistente (en disco/SQLite)
+    - Nivel 3 (Archivo): Contenido original exacto almacenado de forma persistente (en disco/SQLite FTS5)
       para recuperación de hechos/cifras sin pérdida por compresión o alucinación.
     """
 
@@ -41,7 +38,7 @@ class HierarchicalContextManager:
         # Nivel 2: Segmentos Comprimidos Latentes en RAM
         self.compressed_segments: List[Dict[str, Any]] = []
 
-        # Nivel 3: Archivo Persistente (Base de datos SQLite indexada - Modo 30B)
+        # Nivel 3: Archivo Persistente (Base de datos SQLite indexada con FTS5 - Modo 30B)
         if self.enable_sqlite_context_l3:
             self.conn = sqlite3.connect(self.db_path)
             self._init_archive_db()
@@ -67,7 +64,16 @@ class HierarchicalContextManager:
             """
         )
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_start_pos ON context_archive(start_token_idx)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_keywords ON context_archive(keywords)")
+        cursor.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS context_archive_fts USING fts5(
+                raw_text,
+                keywords,
+                content='context_archive',
+                content_rowid='chunk_id'
+            )
+            """
+        )
         self.conn.commit()
 
     def ingest_tokens(
@@ -95,7 +101,12 @@ class HierarchicalContextManager:
             start_idx = self.total_tokens_ingested - len(self.active_token_ids) - seg_len
             end_idx = start_idx + seg_len
 
-            # 1. Archivar en Nivel 3 (Original exacto si está activo)
+            raw_bytes = bytes([t for t in seg_tokens if 0 <= t < 256])
+            raw_text = raw_bytes.decode("utf-8", errors="replace")
+            words = [w.strip() for w in raw_text.split() if len(w.strip()) > 0]
+            keywords_str = " ".join(words)
+
+            # 1. Archivar en Nivel 3 (Original exacto con FTS5 si está activo)
             chunk_id = None
             if self.enable_sqlite_context_l3 and self.conn is not None:
                 cursor = self.conn.cursor()
@@ -106,13 +117,19 @@ class HierarchicalContextManager:
                     """,
                     (start_idx, end_idx, raw_bytes, raw_text, keywords_str),
                 )
-                self.conn.commit()
                 chunk_id = cursor.lastrowid
+                cursor.execute(
+                    """
+                    INSERT INTO context_archive_fts (rowid, raw_text, keywords)
+                    VALUES (?, ?, ?)
+                    """,
+                    (chunk_id, raw_text, keywords_str),
+                )
+                self.conn.commit()
             else:
                 chunk_id = len(self.compressed_segments) + 1
 
             # 2. Comprimir en Nivel 2 (Resumen latente)
-            # Representación compacta del segmento (ej. vector latente promedio)
             seg_summary = {
                 "chunk_id": chunk_id,
                 "start_idx": start_idx,
@@ -133,7 +150,7 @@ class HierarchicalContextManager:
     def retrieve_exact_fact(self, query: str, top_k: int = 2) -> List[Dict[str, Any]]:
         """
         Recupera fragmentos originales del Nivel 3 (Archivo) basados en coincidencias
-        de palabras clave o términos específicos (evita degradación o pérdida de datos históricos).
+        de palabras clave o términos específicos mediante SQLite FTS5 (con fallback LIKE).
         Filtra stopwords para evitar falsos positivos con palabras cortas de relleno.
         """
         self.retrieval_queries_count += 1
@@ -157,11 +174,13 @@ class HierarchicalContextManager:
                 seg_words = seg.get("keywords", [])
                 hits = sum(1 for q in query_terms if q.lower() in [w.lower() for w in seg_words])
                 if hits > 0:
+                    text_str = " ".join(seg_words)
                     results.append({
                         "chunk_id": seg["chunk_id"],
                         "start_pos": seg["start_idx"],
                         "end_pos": seg["end_idx"],
-                        "text": " ".join(seg_words),
+                        "text": text_str,
+                        "raw_text": text_str,
                         "relevance_score": hits,
                     })
             results.sort(key=lambda x: x["relevance_score"], reverse=True)
@@ -171,28 +190,44 @@ class HierarchicalContextManager:
         cursor = self.conn.cursor()
         results = []
         for term in query_terms:
-            cursor.execute(
-                """
-                SELECT chunk_id, start_token_idx, end_token_idx, raw_text, keywords
-                FROM context_archive
-                WHERE keywords LIKE ? OR raw_text LIKE ?
-                ORDER BY chunk_id ASC
-                LIMIT ?
-                """,
-                (f"%{term}%", f"%{term}%", top_k),
-            )
-            rows = cursor.fetchall()
+            safe_term = term.replace('"', '""')
+            try:
+                cursor.execute(
+                    """
+                    SELECT a.chunk_id, a.start_token_idx, a.end_token_idx, a.raw_text, a.keywords
+                    FROM context_archive_fts f
+                    JOIN context_archive a ON f.rowid = a.chunk_id
+                    WHERE context_archive_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                    """,
+                    (f'"{safe_term}"', top_k),
+                )
+                rows = cursor.fetchall()
+            except sqlite3.OperationalError:
+                cursor.execute(
+                    """
+                    SELECT chunk_id, start_token_idx, end_token_idx, raw_text, keywords
+                    FROM context_archive
+                    WHERE keywords LIKE ? OR raw_text LIKE ?
+                    ORDER BY chunk_id ASC
+                    LIMIT ?
+                    """,
+                    (f"%{term}%", f"%{term}%", top_k),
+                )
+                rows = cursor.fetchall()
+
             for r in rows:
                 item = {
                     "chunk_id": r[0],
                     "start_token_idx": r[1],
                     "end_token_idx": r[2],
+                    "text": r[3],
                     "raw_text": r[3],
                     "keywords": r[4],
                 }
                 if not any(x["chunk_id"] == item["chunk_id"] for x in results):
                     results.append(item)
-            # Si encontramos coincidencias para el término más específico (ej. nombre de nodo), no diluir con términos genéricos
             if results:
                 break
 
@@ -205,29 +240,29 @@ class HierarchicalContextManager:
         """
         Inserta fragmentos exactos recuperados desde el Archivo hacia la atención activa
         para que el modelo pueda resolver la pregunta con datos no alucinados.
+        Unifica las claves 'raw_text' y 'text'.
         """
         if isinstance(chunks, dict):
             chunks = [chunks]
         all_tokens = []
         for ch in chunks:
-            raw_text = ch.get("raw_text", "")
+            raw_text = ch.get("raw_text") or ch.get("text") or ""
             all_tokens.extend([b for b in raw_text.encode("utf-8")])
         self.active_token_ids = all_tokens + self.active_token_ids
 
     def get_telemetry(self) -> Dict[str, Any]:
-        """Reporta telemetría de memoria y recuperación contextual."""
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM context_archive")
-        total_archived_chunks = cursor.fetchone()[0]
+        """Reporta telemetría de memoria y recuperación contextual de forma segura."""
+        if self.conn is not None:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM context_archive")
+            total_archived_chunks = cursor.fetchone()[0]
+        else:
+            total_archived_chunks = len(self.compressed_segments)
 
         hit_rate = (
             float(self.retrieval_hits_count) / float(max(1, self.retrieval_queries_count))
         ) * 100.0
 
-        # Huella de memoria en RAM:
-        # Activo: tokens * 1 byte (en precisión de byte)
-        # Comprimido: Nivel 2 almacena metadatos ligeros de orientación
-        # Archivo: Nivel 3 reside en disco (SQLite), ocupando 0 bytes en memoria activa
         ram_active_bytes = len(self.active_token_ids)
         total_tokens = max(1, self.total_tokens_ingested)
         saving_ratio = round(float(total_tokens) / float(max(1, len(self.active_token_ids))), 2)
@@ -246,6 +281,7 @@ class HierarchicalContextManager:
     def close(self) -> None:
         if hasattr(self, "conn") and self.conn is not None:
             self.conn.close()
+            self.conn = None
 
     def __del__(self) -> None:
         self.close()

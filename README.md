@@ -62,7 +62,7 @@ flowchart TD
 ## 3. Los Cinco Ejes Arquitectónicos Fundamentales
 
 ### 3.1. Eje 1: Paginación Binaria a Nivel de Sistema Operativo (Paged BitCOS v1)
-* **Principio:** Consumir tensores directamente empaquetados mediante mapeo en memoria (`mmap`) y núcleos C optimizados, eliminando la expansión flotante a FP32 en RAM.
+* **Principio:** Consumir tensores directamente empaquetados mediante lectura directa de almacenamiento (`O_DIRECT`) con *page pool* alineado y núcleos C optimizados en AVX2, eliminando la expansión flotante a FP32 en RAM y eludiendo la caché de página del sistema operativo.
 * **Alineación:** Bloques alineados estrictamente a **4096 bytes** (tamaño nativo de página de memoria del kernel Linux).
 * **Formatos de empaquetado ([trace/serialization/paged_bitcos.py](trace/serialization/paged_bitcos.py)):**
   * `compact`: Bit de presencia + bit de signo para minimizar ancho de banda PCIe/NVMe.
@@ -128,15 +128,18 @@ Los experimentos fundacionales se ejecutaron bajo el protocolo pre-registrado of
 - Media Test-Comp Full-EM histórica: $5.12\% \pm 4.88\%$ (Máx: $13.33\%$).
 - Scratchpad EM histórica: $81.88\% \pm 10.14\%$.
 
-### 4.3. Estado Actual, Perfil de Hardware y Limitaciones Conocidas
+### 4.3. Estado Actual, Perfil de Hardware y Rendimiento Nativo C
 
-Basic-Lite TRACE se encuentra en **fase activa de desarrollo (v1.2.0-trace)**, con la **Fase 1 (Convergencia QAT y Calibración) completada** y la **Fase 2 (Motor Nativo C TRACE)** activa:
+Basic-Lite TRACE se encuentra consolidado en su versión **v1.3.0-trace**, con la **Fase 1 (Convergencia QAT y Calibración)** y la **Fase 2 (Motor Nativo C TRACE O_DIRECT)** completadas y verificadas con 0 discrepancias frente a PyTorch, iniciando la **Fase 3 (Modelo de Lenguaje Autorregresivo con MLA)**:
 
 | Parámetro del Prototipo Evaluado | Valor Medido en Hardware Base (`i3-1115G4`) |
 | :--- | :--- |
 | **Parámetros del checkpoint actual** | ~870K parámetros ($d=192$, $d_{\text{ff}}=384$, 4 expertos MoE + 1 compartido) |
 | **Consumo pico de RAM en evaluación** | < 120 MB en ejecución CPU |
 | **Entorno verificado** | Linux x86_64 (GCC 13+ con OpenMP y AVX2, Python 3.11, PyTorch CPU) |
+| **Rendimiento Motor C (`trace_infer`)** | **75.59 ms/muestra** (~106 tokens/s brutos, **3.93× speedup** vs PyTorch AddSub) |
+| **I/O Storage Nativo C** | `O_DIRECT` con 1 syscall contigua `pread` para pool de páginas alineado a 4096 bytes |
+| **Optimización Matricial C** | Tiling por bloques $K=512$ y micro-kernel AVX2 sin contención de hilos (`OMP_NUM_THREADS=2`) |
 | **Avance de optimización clave** | El subajuste severo del estimador STE ha sido superado mediante el schedule QAT BitNet b1.58, elevando el Full-EM del 5.12% histórico al 90.29% en Test-Comp |
 
 ---
@@ -161,14 +164,18 @@ Basic-Lite TRACE se encuentra en **fase activa de desarrollo (v1.2.0-trace)**, c
 ├── .github/                                  # Automatización e integración continua
 │   └── workflows/
 │       └── ci.yml                            # Pipeline de CI en GitHub Actions (Ubuntu)
+├── csrc/                                     # Código fuente C modular del motor TRACE
+│   ├── trace_infer.h                         # Cabecera canónica unificada y estructuras de modelo
+│   ├── trace_math.h                          # Rutinas matemáticas optimizadas en AVX2 (RMSNorm, dot product)
+│   ├── paged_gemm.c                          # Kernel GEMM ternario con tiling K=512 y aceleración AVX2
+│   ├── trace_loader.c                        # Cargador de pesos O_DIRECT y validación de cabecera
+│   └── trace_causal.c                        # Pipeline autorregresivo causal y punto de entrada CLI
 ├── config.py                                 # Configuración unificada de hiperparámetros
 ├── data.py                                   # Generador procedural de datos y particiones científicas
 ├── train.py                                  # Pipeline de entrenamiento causal con Staged Warmup
 ├── eval.py                                   # Motor de evaluación causal multivariable en 2 pasos
 ├── requirements.txt                          # Dependencias de entorno fijadas (PyTorch CPU, NumPy)
-├── trace_checkpoint.pt                        # (Excluido en .gitignore; generable vía 7.2 o Releases)
-├── paged_gemm_kernel.c                       # Kernel en C para operaciones matriciales Paged BitCOS
-├── Makefile                                  # Automatización de compilación de kernel C y pruebas
+├── Makefile                                  # Automatización de compilación de kernel C y suites de test
 ├── LICENSE.txt                               # Licencia Source-Available única (Investigación, Docencia y Evaluación)
 ├── CONTRIBUTING.md                           # Directrices de colaboración y equipo núcleo
 ├── NOTICE.md                                 # Aviso de alcance técnico y reserva de derechos
@@ -189,26 +196,33 @@ Basic-Lite TRACE se encuentra en **fase activa de desarrollo (v1.2.0-trace)**, c
 │   ├── RELEASE_MANIFEST.md                   # Manifiesto criptográfico de hashes SHA-256
 │   ├── AI_ASSISTANCE.md                      # Registro de asistencia por IA y límites metodológicos
 │   └── PAPER_TECNICO_BASIC_LITE.md           # Memoria técnica completa y resultados
-├── tests/                                    # Pruebas automatizadas y tests de humo
-│   └── test_smoke.py                         # Test de humo para kernel C y forward pass causal
+├── tests/                                    # Pruebas automatizadas y suites de verificación
+│   ├── test_smoke.py                         # Test de humo para kernel C y forward pass causal
+│   ├── test_avx2_kernel.py                   # Verificación AVX2 int32 (diff == 0) y tiling K
+│   ├── test_paged_bitcos.py                  # Integridad de serialización O_DIRECT 4096-bytes
+│   ├── test_parity_and_falsification.py      # Paridad PyTorch AddSub y falsación cruzada
+│   ├── test_trace_infer.py                   # Inmutabilidad de I/O y paridad nativa C
+│   ├── test_benchmark_fase2.py               # Medición de latencia y speedup >= 3.0x
+│   ├── test_context_manager.py               # Pruebas de SQLite FTS5 y contexto
+│   ├── test_e0_hygiene.py                    # Auditoría de reproducibilidad E0
+│   └── test_architecture_integrity.py        # Verificación estricta de defaults y arquitectura
 ├── trace/                                    # Paquete modular canónico
 │   ├── core/
-│   │   ├── context_manager.py                # Gestor de contexto jerárquico (L1 RAM, L2 Latente, L3 SQLite)
-│   │   ├── weight_manager.py                 # Gestor de residencia y caché LRU de expertos
+│   │   ├── context_manager.py                # Gestor de contexto jerárquico (L1 RAM, L2 Latente, L3 SQLite FTS5)
 │   │   └── types.py                          # Definiciones de tipos y ModelOutput
 │   ├── layers/
 │   │   ├── abacus.py                         # Abacus Positional Embeddings vectorizado
 │   │   ├── bitlinear.py                      # Capa W1.58A8 con gradiente recto (STE)
-│   │   ├── byte_patcher.py                   # Codificador/Decodificador de parches de bytes (P=4)
+│   │   ├── ffn.py                            # TernaryExpert residente con Squared-ReLU
 │   │   └── norm.py                           # RMSNorm
 │   ├── modules/
-│   │   ├── mla_attention.py                  # Multi-Head Latent Attention (MLA)
-│   │   ├── paged_moe.py                      # MemoryAwarePagedMoE con paginación
+│   │   ├── attention.py                      # BlockCausalGQATernaryAttention
+│   │   ├── paged_moe.py                      # PagedMoE residente
 │   │   └── resident_core.py                  # Núcleo ternario residente compartido
 │   ├── models/
 │   │   └── causal.py                         # TRACECausalModel: Modelo causal integrado de 2 etapas
 │   ├── ops/
-│   │   ├── paged_c_kernel.py                 # Enlace ctypes con paged_gemm_kernel.c
+│   │   ├── paged_c_kernel.py                 # Enlace ctypes con csrc/paged_gemm.c
 │   │   └── ternary_cpu.py                    # Operaciones ternarias de CPU
 │   └── serialization/
 │       └── paged_bitcos.py                   # Serialización y lectura de páginas Paged BitCOS v1

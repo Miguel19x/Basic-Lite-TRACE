@@ -1,3 +1,10 @@
+/*
+ * Basic-Lite
+ * Copyright © 2026 Miguel19x
+ * Todos los derechos reservados.
+ * Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+ */
+
 #ifndef TRACE_INFER_H
 #define TRACE_INFER_H
 
@@ -7,6 +14,18 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t row_start;
+    uint32_t rows;
+    uint16_t cols;
+    uint16_t fmt_code; // 0: compact, 1: fast
+    float scale_w;
+    uint32_t len_p1;
+    uint32_t len_p2;
+} PagedHeader;
+#pragma pack(pop)
 
 typedef struct {
     int vocab_size;
@@ -30,12 +49,11 @@ typedef struct {
     int in_features;
     int out_features;
     int num_pages;
-    const uint8_t* const* page_ptrs; // Punteros a las páginas dentro de model->page_pool
-    float scale;                     // Leída dinámicamente desde PagedHeader
-    float* sub_ln_w;                 // RMSNorm sub_ln [in_features] (0 pesos FP32 en W)
+    const uint8_t* const* page_ptrs; // Punteros a páginas en model->page_pool
+    float scale;
+    float* sub_ln_w;                 // RMSNorm sub_ln (0 pesos FP32 en W)
 } TracePagedLinear;
 
-// Búferes prealocados para inferencia sin asignación dinámica en el heap (Zero-Malloc)
 typedef struct {
     float* x_norm;
     int8_t* q_x;
@@ -49,8 +67,6 @@ typedef struct {
     float* joint_state;
     float* norm_z_buf;
     float* norm_y_buf;
-    float* e_r;
-    float* e_t;
     float* q;
     float* k;
     float* v;
@@ -81,13 +97,17 @@ typedef struct {
     size_t pages_offset;             // pages_offset % 4096 == 0
     uint8_t* page_pool;              // Buffer posix_memalign alineado a 4096 bytes
     int used_odirect;                // 1 si O_DIRECT estuvo activo, 0 en fallback
-    uint64_t pread_calls;            // Contador estricto de pread
+    uint64_t pread_calls;            // Contador de pread
 
-    // Tabla RoPE precomputada [max_seq_len, head_dim / 2] (160 * 24)
+    // Tabla RoPE precomputada [160 * 24]
     float rope_cos[160 * 24];
     float rope_sin[160 * 24];
 
-    // Tensores residentes FP32 (cobertura 100% dinámica desde JSON)
+    // Vectores constantes precomputados en carga
+    float e_t_const[192];
+    float e_r_table[8][192];
+
+    // Tensores residentes FP32
     float* token_emb;                // [vocab_size, d_model]
     float* abacus_emb;               // [16, d_model]
     float* stage_emb;                // [4, d_model]
@@ -107,11 +127,11 @@ typedef struct {
     float  halt_gate_b;
     float  alpha_z;
     float  beta_y;
-    float  carry_gate;               // Parámetro residente mapeado
+    float  carry_gate;
     float* final_norm;               // [d_model]
     float* lm_head_w;                // [vocab_size, d_model]
 
-    // 16 Capas Ternarias BitLinear (0 pesos FP32 en RAM)
+    // 16 Capas Ternarias BitLinear
     TracePagedLinear anchor_proj;
     TracePagedLinear attn_q;
     TracePagedLinear attn_k;
@@ -123,35 +143,24 @@ typedef struct {
     TracePagedLinear shared_down;
     TracePagedLinear answer_updater;
 
-    // Workspace reutilizable
     TraceWorkspace workspace;
 } TraceModel;
 
-// Inspección de ABI y memoria para Python ctypes
 size_t trace_model_sizeof(void);
-
-// Ciclo de vida
 int trace_model_load_odirect(const char* bin_path, TraceModel* model);
 void trace_model_free(TraceModel* model);
 
-// Perfilado temporal estricto (CLOCK_MONOTONIC)
-void trace_model_reset_profile(void);
-void trace_model_print_profile(void);
-void trace_model_print_profile_report(void);
-
-// Getters de auditoría O_DIRECT
 int trace_model_get_used_odirect(const TraceModel* model);
 uint64_t trace_model_get_pread_calls(const TraceModel* model);
 size_t trace_model_get_pages_offset(const TraceModel* model);
 
-// Inferencia
 void trace_forward_backbone(
     TraceModel* model,
     const int32_t* token_ids,
     int seq_len,
     int stage_id,
-    int prompt_len,                  // <= 0: block-causal estándar; > 0: target-unified
-    float* out_logits                // [seq_len, vocab_size]
+    int prompt_len,
+    float* out_logits
 );
 
 void trace_forward_backbone_lazy(

@@ -19,15 +19,19 @@ def get_paged_c_lib() -> ctypes.CDLL:
         return _LIB_PAGED_INSTANCE
 
     curr_dir = Path(__file__).resolve().parent.parent.parent
-    c_path = curr_dir / "paged_gemm_kernel.c"
+    c_path = curr_dir / "csrc" / "paged_gemm.c"
     so_path = curr_dir / "libpaged_gemm.so"
 
     if not so_path.exists() or (c_path.exists() and c_path.stat().st_mtime > so_path.stat().st_mtime):
         cmd = [
             "gcc",
             "-O3",
-            "-march=native",
+            "-mavx2",
+            "-mfma",
+            "-ffp-contract=off",
             "-fopenmp",
+            "-Wall",
+            "-Wextra",
             "-shared",
             "-fPIC",
             str(c_path),

@@ -26,8 +26,19 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
 
-      - name: Build C Kernel
-        run: make
+      - name: Build C Engine and Kernel
+        run: make all
 
-      - name: Run Smoke Tests
-        run: PYTHONPATH=. pytest tests/test_smoke.py -v
+      - name: Run Active Test Suites
+        run: |
+          PYTHONPATH=. python tests/test_smoke.py
+          PYTHONPATH=. python tests/test_avx2_kernel.py
+          PYTHONPATH=. python tests/test_paged_bitcos.py
+          PYTHONPATH=. python tests/test_context_manager.py
+          PYTHONPATH=. python tests/test_e0_hygiene.py
+          PYTHONPATH=. python tests/test_architecture_integrity.py
+          if [ -f checkpoints/trace_s456_fase1_paged_bitcos.bin ]; then
+            PYTHONPATH=. python tests/test_trace_infer.py
+            PYTHONPATH=. python tests/test_parity_and_falsification.py
+            PYTHONPATH=. python tests/test_benchmark_fase2.py
+          fi

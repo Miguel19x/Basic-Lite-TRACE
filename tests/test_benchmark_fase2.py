@@ -71,10 +71,6 @@ def run_benchmark():
     lib.trace_model_free.argtypes = [ctypes.c_void_p]
     lib.trace_model_free.restype = None
 
-    lib.trace_model_reset_profile.argtypes = []
-    lib.trace_model_reset_profile.restype = None
-    lib.trace_model_print_profile.argtypes = []
-    lib.trace_model_print_profile.restype = None
 
     lib.trace_generate_causal_two_step.argtypes = [
         ctypes.c_void_p,
@@ -111,7 +107,6 @@ def run_benchmark():
             model_addsub.generate_causal_two_step(p_bytes)
             model_fp32.generate_causal_two_step(p_bytes)
 
-    lib.trace_model_reset_profile()
 
     # 5. Medición Formal
     lat_c = []
@@ -202,11 +197,7 @@ def run_benchmark():
     print(f"  COINCIDENCIA TEXTUAL VS FP32:     {matches_fp32}/{total_eval} ({matches_fp32/total_eval*100:.1f}%)")
     print("-" * 78)
 
-    print("\n" + "=" * 78)
-    print("  DESGLOSE TEMPORAL CLOCK_MONOTONIC (HITO 2.5)")
-    print("=" * 78)
-    lib.trace_model_print_profile()
-    print("=" * 78)
+
 
     # Verificaciones mandatorias
     assert matches_addsub == total_eval, f"Fallo de coincidencia textual vs AddSub: {matches_addsub}/{total_eval}"

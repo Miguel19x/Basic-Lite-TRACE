@@ -39,13 +39,14 @@ def compile_and_load_ternary_kernel() -> Optional[ctypes.CDLL]:
         except Exception:
             pass
 
-    c_path = curr_dir / "csrc" / "ternary_kernel.c"
+    c_path = curr_dir.parent.parent / "csrc" / "paged_gemm.c"
     so_path = curr_dir / "libternary.so"
 
     try:
         if not so_path.exists() or (c_path.exists() and c_path.stat().st_mtime > so_path.stat().st_mtime):
             cmd = [
-                "gcc", "-O3", "-march=native", "-fopenmp", "-shared", "-fPIC",
+                "gcc", "-O3", "-mavx2", "-mfma", "-ffp-contract=off", "-fopenmp",
+                "-Wall", "-Wextra", "-shared", "-fPIC",
                 str(c_path), "-o", str(so_path)
             ]
             res = subprocess.run(cmd, capture_output=True, text=True)

@@ -8,38 +8,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from trace.core.weight_manager import WeightMovementManager
 from trace.layers.bitlinear import BitLinear
 from trace.layers.embeddings import SinusoidalStepEncoding
 from trace.layers.norm import RMSNorm
 from trace.modules.attention import BlockCausalGQATernaryAttention
-from trace.modules.mla_attention import MultiHeadLatentAttention
 from trace.modules.paged_moe import MemoryAwarePagedMoE
 
 
 class SharedResidentTernaryCore(nn.Module):
     """
     Núcleo ternario compartido residente de Basic-Lite TRACE:
-    - Multi-Head Latent Attention (MLA) o Block-Causal GQA según sistema de activación.
-    - MoE con paginación de expertos y enrutamiento consciente de memoria RAM/SSD.
+    - Block-Causal GQA Ternary Attention.
+    - MoE con 4 expertos residentes en RAM + experto compartido.
     - Dinámica dual de razonamiento (z_r) y respuesta (y_r) con escala residual compartida.
     """
 
-    def __init__(self, cfg, weight_manager: Optional[WeightMovementManager] = None):
+    def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.use_mla = getattr(cfg, "use_mla", False)
         self.norm_z = RMSNorm(cfg.d_model, eps=cfg.eps)
         self.norm_y = RMSNorm(cfg.d_model, eps=cfg.eps)
         self.norm_moe = RMSNorm(cfg.d_model, eps=cfg.eps)
         self.norm_refine = RMSNorm(cfg.d_model, eps=cfg.eps)
 
         self.anchor_proj = BitLinear(cfg.d_model, cfg.d_model, eps=cfg.eps)
-        if self.use_mla:
-            self.attn = MultiHeadLatentAttention(cfg)
-        else:
-            self.attn = BlockCausalGQATernaryAttention(cfg)
-        self.paged_moe = MemoryAwarePagedMoE(cfg, weight_manager=weight_manager)
+        self.attn = BlockCausalGQATernaryAttention(cfg)
+        self.paged_moe = MemoryAwarePagedMoE(cfg)
         self.answer_updater = BitLinear(cfg.d_model, cfg.d_model, eps=cfg.eps)
 
         self.halt_gate = nn.Linear(cfg.d_model, 1)
@@ -96,33 +90,20 @@ class SharedResidentTernaryCore(nn.Module):
 
         joint_state = self.norm_z(z_r) + self.norm_y(y_r) + anchor_feat + e_t + e_r
 
-        # Atención: Multi-Head Latent Attention (MLA) o BlockCausalGQATernaryAttention según activación
-        if self.use_mla:
-            attn_out, updated_latent_kv = self.attn(
-                joint_state,
-                latent_kv_cache=latent_kv_cache,
-                start_pos=start_pos,
-                record_telemetry=record_telemetry,
-                integer_mode=integer_mode,
-                add_sub_mode=add_sub_mode,
-                attn_mask=attn_mask,
-            )
-        else:
-            attn_out, updated_latent_kv = self.attn(
-                joint_state,
-                kv_cache=latent_kv_cache,
-                start_pos=start_pos,
-                record_telemetry=record_telemetry,
-                integer_mode=integer_mode,
-                add_sub_mode=add_sub_mode,
-                attn_mask=attn_mask,
-            )
+        attn_out, updated_latent_kv = self.attn(
+            joint_state,
+            kv_cache=latent_kv_cache,
+            start_pos=start_pos,
+            record_telemetry=record_telemetry,
+            integer_mode=integer_mode,
+            add_sub_mode=add_sub_mode,
+            attn_mask=attn_mask,
+        )
         eff_alpha = self.alpha_z * step_scale
         eff_beta = self.beta_y * step_scale
 
         z_mid = z_r + active_mask * eff_alpha * attn_out
 
-        # Memory-Aware Paged MoE
         moe_out, curr_node_ids = self.paged_moe(
             self.norm_moe(z_mid),
             t_noise=t_noise,

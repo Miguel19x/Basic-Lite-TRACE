@@ -8,6 +8,10 @@
 
 ---
 
+> [!NOTE]
+> **Nota de Contexto y Corte Histórico:**  
+> Este documento técnico refleja el corte histórico fundacional del proyecto correspondiente a la versión **`v1.0.0-trace`** (Full-EM composicional de $5.12\% \pm 4.88\%$). Los resultados aquí reportados han sido ampliamente superados en versiones posteriores: en **`v1.2.0-trace`** mediante el schedule QAT de 2 etapas estilo BitNet b1.58 (alcanzando **$90.29\% \pm 13.44\%$** de Full-EM composicional con pico de **$98.96\%$**), y en **`v1.3.0-trace`** con la consolidación del motor nativo C `O_DIRECT` con *page pool* alineado (0 discrepancias frente a PyTorch y 0 pesos FP32 en RAM).
+
 ## Resumen Ejecutivo (*Abstract*)
 
 La democratización de los modelos neuronales de gran escala se encuentra actualmente limitada por la exigencia de memoria RAM activa y aceleradores dedicados (GPU). Los enfoques convencionales requieren mantener decenas de gigabytes de pesos en memoria primaria o descomprimir matrices cuantizadas a punto flotante (FP32/FP16) durante la inferencia, saturando el bus de memoria en procesadores domésticos.

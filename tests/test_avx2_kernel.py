@@ -96,7 +96,7 @@ def test_avx2_paged_fast_multi_exact_int32():
     rng = np.random.RandomState(123)
 
     M_list = [1, 4]
-    K_list = [32, 192]
+    K_list = [32, 192, 530, 768]
     total_rows = 64
     rows_per_page = 16
 
