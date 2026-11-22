@@ -3,21 +3,35 @@
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
+import dataclasses
 import io
+import json
 import mmap
 import os
 import struct
-from typing import Any, Dict, List, Optional, Tuple, Union
+from trace.layers.bitlinear import BitLinear
+from typing import Any
+
 import numpy as np
 import torch
 import torch.nn as nn
 
-from trace.layers.bitlinear import BitLinear
-
-
 # Magic identificador para el formato de ejecución por páginas (Paged BitCOS v1)
 MAGIC_PBITCOS = b"PBITCOS1"
 DEFAULT_PAGE_SIZE = 4096  # 4 KB por página, óptimo para paginación de SO y lecturas alineadas SSD
+
+
+def count_fp32_weights_in_bitlinear(model: nn.Module) -> int:
+    """Cuenta elementos FP32 en los parámetros y cachés de BitLinear."""
+    total_fp32 = 0
+    for _, module in model.named_modules():
+        if isinstance(module, BitLinear):
+            if module.weight is not None and module.weight.dtype == torch.float32 and module.weight.numel() > 0:
+                total_fp32 += module.weight.numel()
+            if hasattr(module, "cached_w_eff") and module.cached_w_eff is not None:
+                if module.cached_w_eff.numel() > 0 and module.cached_w_eff.dtype == torch.float32:
+                    total_fp32 += module.cached_w_eff.numel()
+    return total_fp32
 
 
 class PagedBitCOSSerializer:
@@ -48,7 +62,6 @@ class PagedBitCOSSerializer:
         """
         rows, cols = q_w_chunk.shape
         flat = q_w_chunk.flatten().astype(np.int8)
-        num_weights = flat.size
 
         if format_type == "compact":
             presence_bits = (flat != 0).astype(np.uint8)
@@ -110,13 +123,27 @@ class PagedBitCOSSerializer:
         output_path: str,
         page_size: int = DEFAULT_PAGE_SIZE,
         format_type: str = "compact",
-    ) -> Dict[str, Any]:
+        architecture: str | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """
         Exporta el modelo a un archivo binario Paged BitCOS alineado a páginas.
         Separa componentes residentes (embeddings, normas) de páginas ternarias (pesos de proyección y expertos).
         """
-        tensor_index: List[Dict[str, Any]] = []
-        expert_index: Dict[int, List[int]] = {}
+        if architecture is None and config is None and hasattr(model, "cfg"):
+            cfg_obj = model.cfg
+            cls_name = cfg_obj.__class__.__name__
+            if cls_name == "TRACELMConfig":
+                architecture = "trace-lm-v1"
+                if dataclasses.is_dataclass(cfg_obj):
+                    config = dataclasses.asdict(cfg_obj)
+            elif cls_name == "HybridConfig":
+                architecture = "trace-causal-v1"
+                if dataclasses.is_dataclass(cfg_obj):
+                    config = dataclasses.asdict(cfg_obj)
+
+        tensor_index: list[dict[str, Any]] = []
+        expert_index: dict[int, list[int]] = {}
         resident_bytes = io.BytesIO()
         pages_bytes = io.BytesIO()
 
@@ -127,7 +154,7 @@ class PagedBitCOSSerializer:
             if isinstance(module, BitLinear):
                 # Extraer pesos cuantizados y escala
                 with torch.no_grad():
-                    w_eff, q_w, scale_w = module.quantize_weights()
+                    _, q_w, scale_w = module.quantize_weights()
                     codes_np = q_w.cpu().numpy().astype(np.int8)
                     scale_val = float(scale_w.item())
 
@@ -160,7 +187,6 @@ class PagedBitCOSSerializer:
 
                 is_expert = "expert" in name
                 if is_expert:
-                    # Detectar ID del experto
                     parts = name.split(".")
                     exp_id = -1
                     for p in parts:
@@ -189,7 +215,7 @@ class PagedBitCOSSerializer:
                 for mod_name, mod in named_modules.items()
                 if isinstance(mod, BitLinear)
             )
-            if not is_bitlinear_weight and param.requires_grad:
+            if not is_bitlinear_weight and param.numel() > 0:
                 p_np = param.detach().cpu().numpy().astype(np.float32)
                 p_bytes = p_np.tobytes()
                 p_offset = resident_bytes.tell()
@@ -203,10 +229,18 @@ class PagedBitCOSSerializer:
                     "dtype": "float32",
                 })
 
-        # Serializar índices en bloques JSON/Binario
-        import json
-        idx_json = json.dumps({"tensors": tensor_index, "format": format_type}).encode("utf-8")
-        exp_json = json.dumps({"experts": expert_index}).encode("utf-8")
+        # Serializar índices en bloques JSON/Binario con metadatos de arquitectura
+        idx_payload: dict[str, Any] = {
+            "tensors": tensor_index,
+            "format": format_type,
+        }
+        if architecture is not None:
+            idx_payload["architecture"] = architecture
+        if config is not None:
+            idx_payload["config"] = config
+
+        idx_json = json.dumps(idx_payload).encode()
+        exp_json = json.dumps({"experts": expert_index}).encode()
 
         # Construir archivo final
         header_size = 64
@@ -256,6 +290,7 @@ class PagedBitCOSSerializer:
             "total_bytes": total_file_size,
             "tensors_count": len(tensor_index),
             "experts_count": len(expert_index),
+            "architecture": architecture,
         }
 
 
@@ -286,13 +321,20 @@ class PagedBitCOSReader:
         self.pages_offset = pgs_off
         self.total_size = total_sz
 
-        import json
         idx_data = self._mm[idx_off:exp_off].decode("utf-8")
         self.index_data = json.loads(idx_data)
         self.tensors_map = {t["name"]: t for t in self.index_data["tensors"]}
 
         exp_data = self._mm[exp_off:res_off].decode("utf-8")
         self.expert_map = json.loads(exp_data)["experts"]
+
+    def get_architecture(self) -> str | None:
+        """Devuelve el identificador de arquitectura o None si no existe en el binario."""
+        return self.index_data.get("architecture")
+
+    def get_model_config(self) -> dict[str, Any] | None:
+        """Devuelve el diccionario de configuración del modelo o None si no existe."""
+        return self.index_data.get("config")
 
     def read_page_bytes(self, page_id: int) -> bytes:
         """Lee una sola página de 4KB desde el archivo mapeado en memoria (cero sobrecarga de descompresión global)."""
@@ -301,7 +343,7 @@ class PagedBitCOSReader:
         start = self.pages_offset + page_id * self.page_size
         return self._mm[start : start + self.page_size]
 
-    def read_resident_tensor(self, name: str) -> Optional[np.ndarray]:
+    def read_resident_tensor(self, name: str) -> np.ndarray | None:
         """Recupera un tensor residente (FP32) directamente del archivo."""
         info = self.tensors_map.get(name)
         if not info or not info.get("is_resident", False):
@@ -312,7 +354,7 @@ class PagedBitCOSReader:
         arr = np.frombuffer(raw, dtype=np.float32).reshape(info["shape"])
         return arr.copy()
 
-    def get_expert_pages(self, expert_id: int) -> List[int]:
+    def get_expert_pages(self, expert_id: int) -> list[int]:
         """Retorna las páginas que componen a un experto determinado."""
         return self.expert_map.get(str(expert_id), [])
 
@@ -324,7 +366,7 @@ class PagedBitCOSReader:
         from trace.layers.bitlinear import BitLinear
         from trace.ops.paged_kernel import unpack_page_to_dense
 
-        # 1. Cargar tensores residentes (embeddings, normas, MLPs de ruido)
+        # 1. Cargar tensores residentes (embeddings, normas, etc.)
         loaded_resident = 0
         with torch.no_grad():
             for name, param in model.named_parameters():
@@ -332,6 +374,14 @@ class PagedBitCOSReader:
                 if arr is not None:
                     param.data.copy_(torch.from_numpy(arr))
                     loaded_resident += 1
+
+        # Preservar tied embeddings explícitamente si aplica
+        if (
+            hasattr(model, "lm_head")
+            and hasattr(model, "tok_emb")
+            and getattr(getattr(model, "cfg", None), "tie_word_embeddings", False)
+        ):
+            model.lm_head.weight = model.tok_emb.weight
 
         # 2. Cargar capas ternarias BitLinear desde las páginas
         loaded_bitlinear = 0
@@ -341,7 +391,6 @@ class PagedBitCOSReader:
                 info = self.tensors_map.get(name)
                 if info and not info.get("is_resident", False):
                     out_f, in_f = info["shape"]
-                    scale_val = info["scale"]
                     full_codes = torch.zeros(out_f, in_f, dtype=torch.int8)
 
                     scales = []
@@ -352,9 +401,10 @@ class PagedBitCOSReader:
                         scales.append(sc)
 
                     module.int8_codes.copy_(full_codes)
-                    scale_val = sum(scales) / len(scales)
+                    # En capas multipágina, scales[0] garantiza la escala original exacta sin redondeo residual
+                    scale_val = scales[0] if scales else info["scale"]
                     module.packed_scale.fill_(scale_val)
-                    # Criterio Fase 2: 0 pesos FP32 en RAM para proyecciones BitLinear
+                    # Criterio Fase 2/3: 0 pesos FP32 en RAM para proyecciones BitLinear
                     module.cached_w_eff = torch.empty(0)
                     module.weight = nn.Parameter(torch.empty(0), requires_grad=False)
                     module.use_loaded_bitcos = True
@@ -362,7 +412,7 @@ class PagedBitCOSReader:
 
         return loaded_resident + loaded_bitlinear
 
-    def get_accounting_breakdown(self) -> Dict[str, Any]:
+    def get_accounting_breakdown(self) -> dict[str, Any]:
         """
         Desglosa con precisión contable cada sección del archivo binario Paged BitCOS.
         Aclara la discrepancia entre el tamaño de páginas ternarias y el tamaño total del binario.
@@ -370,7 +420,6 @@ class PagedBitCOSReader:
         header_len = self.idx_offset
         idx_len = self.exp_offset - self.idx_offset
         exp_len = self.res_offset - self.exp_offset
-        res_len = self.pages_offset - self.res_offset  # Incluye parámetros residentes FP32 + padding de alineación
         pages_len = self.total_size - self.pages_offset
 
         # Desglose de parámetros residentes en FP32
