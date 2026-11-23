@@ -45,6 +45,7 @@ jobs:
           PYTHONPATH=. python tests/test_tokenizer_parity.py
           PYTHONPATH=. python tests/test_mla_language_model.py
           PYTHONPATH=. python tests/test_mla_serialization.py
+          PYTHONPATH=. python tests/test_trace_lm_infer.py
           if [ -f checkpoints/trace_s456_fase1_paged_bitcos.bin ]; then
             PYTHONPATH=. python tests/test_trace_infer.py
             PYTHONPATH=. python tests/test_parity_and_falsification.py

@@ -12,6 +12,7 @@ __pycache__/
 *.o
 *.so
 trace_infer
+trace_lm
 .ninja*
 
 # Checkpoints y binarios de modelos

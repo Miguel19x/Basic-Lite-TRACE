@@ -15,6 +15,8 @@
 extern "C" {
 #endif
 
+#ifndef PAGED_HEADER_DEFINED
+#define PAGED_HEADER_DEFINED
 #pragma pack(push, 1)
 typedef struct {
     uint32_t row_start;
@@ -26,6 +28,7 @@ typedef struct {
     uint32_t len_p2;
 } PagedHeader;
 #pragma pack(pop)
+#endif
 
 typedef struct {
     int vocab_size;

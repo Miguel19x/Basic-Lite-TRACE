@@ -1,0 +1,141 @@
+/*
+ * Basic-Lite
+ * Copyright © 2026 Miguel19x
+ * Todos los derechos reservados.
+ * Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+ */
+
+#ifndef TRACE_LM_H
+#define TRACE_LM_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Declaración opaca de KV Cache
+struct TraceLMKVCache;
+
+typedef struct {
+    int vocab_size;
+    int d_model;
+    int n_layers;
+    int n_heads;
+    int d_ff;
+    int max_seq_len;
+    float eps;
+    int kv_lora_rank;      // d_c
+    int qk_nope_head_dim;  // d_h
+    int qk_rope_head_dim;  // d_pe
+    int v_head_dim;        // d_v
+    int tie_word_embeddings;
+    int pad_token_id;
+    int mask_token_id;
+    int bos_token_id;
+    int eos_token_id;
+} TraceLMConfig;
+
+typedef struct {
+    int in_features;
+    int out_features;
+    int num_pages;
+    const uint8_t* const* page_ptrs;
+    float scale;
+    float* sub_ln_w;       // NULL si use_sub_ln == 0 (w_uk, w_uv)
+} TraceLMPagedLinear;
+
+typedef struct {
+    float* attn_norm_w;    // [d_model]
+    float* ffn_norm_w;     // [d_model]
+    float* kv_norm_w;      // [kv_lora_rank]
+    TraceLMPagedLinear w_dkv;
+    TraceLMPagedLinear w_uk;
+    TraceLMPagedLinear w_uv;
+    TraceLMPagedLinear w_kr;
+    TraceLMPagedLinear w_q;
+    TraceLMPagedLinear w_qr;
+    TraceLMPagedLinear w_out;
+    TraceLMPagedLinear ffn_up;
+    TraceLMPagedLinear ffn_down;
+} TraceLMLayer;
+
+typedef struct {
+    TraceLMConfig cfg;
+    float* tok_emb;        // [vocab_size * d_model]
+    float* lm_head_w;      // [vocab_size * d_model] (alias de tok_emb si tie_word_embeddings == 1)
+    float* final_norm_w;   // [d_model]
+    TraceLMLayer* layers;  // [n_layers]
+    float* rope_cos;       // [max_seq_len * qk_rope_head_dim]
+    float* rope_sin;       // [max_seq_len * qk_rope_head_dim]
+    void* page_pool;       // Buffer alineado a 4096 bytes cargado en 1 pread
+    size_t page_pool_bytes;
+    int pread_calls;       // Syscalls pread (cabecera + pool contiguo = 2)
+    int used_odirect;      // 1: O_DIRECT activo, 0: lectura estandar
+    int fd;
+} TraceLMModel;
+
+typedef struct {
+    int max_batch_seq;
+    int max_in_dim;
+    int max_out_dim;
+    float* x;              // [max_batch_seq * d_model]
+    float* x_norm;         // [max_batch_seq * max_in_dim]
+    int8_t* q_x;           // [max_batch_seq * max_in_dim]
+    float* scale_x;        // [max_batch_seq]
+    int32_t* acc_int32;    // [max_batch_seq * max_out_dim]
+    float* q_c;            // [max_batch_seq * n_heads * qk_nope_head_dim]
+    float* q_pe;           // [max_batch_seq * n_heads * qk_rope_head_dim]
+    float* q_c_absorbed;   // [max_batch_seq * n_heads * kv_lora_rank]
+    float* scores;         // [n_heads * max_batch_seq * max_seq_len]
+    float* attn_probs;     // [n_heads * max_batch_seq * max_seq_len]
+    float* o_latent;       // [n_heads * max_batch_seq * kv_lora_rank]
+    float* o_heads;        // [max_batch_seq * n_heads * v_head_dim]
+    float* ffn_hidden;     // [max_batch_seq * d_ff]
+    // Buffers scratchpad dedicados
+    float* c_kv_tmp;       // [max_batch_seq * kv_lora_rank]
+    float* k_pe_tmp;       // [max_batch_seq * qk_rope_head_dim]
+    float* attn_out;       // [max_batch_seq * d_model]
+    float* ffn_out;        // [max_batch_seq * d_model]
+} TraceLMWorkspace;
+
+// Carga y destrucción de modelo
+TraceLMModel* trace_lm_load(const char* bin_path);
+void trace_lm_free(TraceLMModel* model);
+
+// Workspace
+TraceLMWorkspace* trace_lm_workspace_create(const TraceLMConfig* cfg, int max_batch_seq);
+void trace_lm_workspace_free(TraceLMWorkspace* ws);
+
+// Inferencia autorregresiva
+int trace_lm_forward(
+    TraceLMModel* model,
+    struct TraceLMKVCache* kv,
+    const int* input_tokens,
+    int num_tokens,
+    float* out_logits,
+    int last_token_only,
+    TraceLMWorkspace* ws
+);
+
+// Muestreo
+int trace_lm_sample_greedy(const float* logits, int vocab_size);
+int trace_lm_sample(
+    const float* logits,
+    int vocab_size,
+    float temperature,
+    int top_k,
+    float top_p,
+    uint64_t* rng_state
+);
+
+// Getters ABI para ctypes
+int trace_lm_get_pread_calls(const TraceLMModel* model);
+int trace_lm_get_used_odirect(const TraceLMModel* model);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // TRACE_LM_H
