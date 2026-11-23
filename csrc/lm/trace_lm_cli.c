@@ -45,6 +45,7 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--rep_pen") == 0 && i + 1 < argc) rep_pen = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--int8_kv") == 0 && i + 1 < argc) use_int8_kv = atoi(argv[++i]);
         else if (strcmp(argv[i], "--no_int8_kv") == 0 || strcmp(argv[i], "--fp32_kv") == 0) use_int8_kv = 0;
+        else if (strcmp(argv[i], "--isa") == 0 && i + 1 < argc) trace_cpu_set_isa(argv[++i]);
         else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
             seed = (uint64_t)strtoull(argv[++i], NULL, 10);
             seed_provided = 1;

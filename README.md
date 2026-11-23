@@ -130,17 +130,58 @@ Los experimentos fundacionales se ejecutaron bajo el protocolo pre-registrado of
 
 ### 4.3. Estado Actual, Perfil de Hardware y Rendimiento Nativo C
 
-Basic-Lite TRACE se encuentra consolidado en su versión **v1.3.0-trace**, con la **Fase 1 (Convergencia QAT y Calibración)** y la **Fase 2 (Motor Nativo C TRACE O_DIRECT)** completadas y verificadas con 0 discrepancias frente a PyTorch, iniciando la **Fase 3 (Modelo de Lenguaje Autorregresivo con MLA)**:
+Basic-Lite TRACE se encuentra consolidado en su versión **v1.4.0-trace**, con la **Fase 1 (Convergencia QAT y Calibración)**, la **Fase 2 (Motor Nativo C TRACE O_DIRECT)** y la **Fase 3 (Modelo de Lenguaje Autorregresivo con MLA y Motor C Standalone)** completadas y verificadas con 0 discrepancias frente a PyTorch:
 
 | Parámetro del Prototipo Evaluado | Valor Medido en Hardware Base (`i3-1115G4`) |
 | :--- | :--- |
-| **Parámetros del checkpoint actual** | ~870K parámetros ($d=192$, $d_{\text{ff}}=384$, 4 expertos MoE + 1 compartido) |
-| **Consumo pico de RAM en evaluación** | < 120 MB en ejecución CPU |
+| **Parámetros del checkpoint actual** | ~47.2M parámetros (`45m-bi`, $L=14$, $d=640$, $n_{\text{heads}}=10$, $d_{\text{ff}}=1280$) |
+| **Consumo pico de RAM en inferencia** | **36.22 MB** en ejecución C standalone en CPU (AVX2 + INT8 KV) |
 | **Entorno verificado** | Linux x86_64 (GCC 13+ con OpenMP y AVX2, Python 3.11, PyTorch CPU) |
-| **Rendimiento Motor C (`trace_infer`)** | **75.59 ms/muestra** (~106 tokens/s brutos, **3.93× speedup** vs PyTorch AddSub) |
-| **I/O Storage Nativo C** | `O_DIRECT` con 1 syscall contigua `pread` para pool de páginas alineado a 4096 bytes |
-| **Optimización Matricial C** | Tiling por bloques $K=512$ y micro-kernel AVX2 sin contención de hilos (`OMP_NUM_THREADS=2`) |
-| **Avance de optimización clave** | El subajuste severo del estimador STE ha sido superado mediante el schedule QAT BitNet b1.58, elevando el Full-EM del 5.12% histórico al 90.29% en Test-Comp |
+| **Rendimiento Motor C (`trace_lm`)** | **214 a 237 tokens/s** en decodificación autorregresiva (TTFT < 18 ms) |
+| **I/O Storage Nativo C** | `O_DIRECT` con 2 syscalls contiguas `pread` para pool de páginas alineado a 4096 bytes (31.02 MB binario) |
+| **Optimización Matricial C** | Kernel AVX2 Add-Sub en registros vectoriales sin contención de hilos (`OMP_NUM_THREADS=2`) |
+| **Avance de optimización clave** | Preentrenamiento bilingüe (524.3M tokens en Kaggle `2× T4`, $\text{Val PPL}=22.08$) con paridad de exportación $3.34\times 10^{-6}$ |
+
+### 4.4. Resultados Consolidados de Fase 3 (v1.4.0-trace — Hito 3.7: Preentrenamiento Bilingüe 45m-bi W1.58 y Motor C Standalone)
+
+El **Hito 3.7** culmina la Fase 3 con el primer preentrenamiento a gran escala de un modelo de lenguaje autorregresivo bilingüe (EN/ES) 100% ternario W1.58 (**`45m-bi`**, 47.2M parámetros) entrenado en Kaggle sobre `2× NVIDIA Tesla T4` durante 8,000 pasos (524.3M tokens) y exportado al formato alineado de ejecución por páginas `Paged BitCOS v1.1` (reporte completo en [docs/HITO_3_7_BENCHMARKS.md](docs/HITO_3_7_BENCHMARKS.md)).
+
+#### Especificaciones del Modelo `45m-bi` y Formato Paged BitCOS v1.1
+- **Dimensiones:** $L=14$ capas Transformer, $d_{\text{model}}=640$, $d_{ff}=1280$ (Squared-ReLU), $n_{\text{heads}}=10$.
+- **Atención Latente (MLA):** Rango de compresión KV $d_c = 160$ ($4\times$ menor a MHA estándar), $d_h=64$, $d_{pe}=32$ (RoPE desacoplado intercalado), $d_v=64$.
+- **Vocabulario y Ligadura:** $V=8,192$ tokens (tokenizador BPE bilingüe nativo EN/ES), tied embeddings (`lm_head.weight is tok_emb.weight`).
+- **Almacenamiento Físico:** 2,716 páginas de 4096 bytes alineadas para lectura directa `O_DIRECT`. Binario ultracompacto de **31.02 MB** (32,522,240 bytes).
+- **Paridad de Exportación Python $\to$ `.bin`:** $\text{max\_diff} = 3.34 \times 10^{-6}$ (0 parámetros corruptos).
+
+#### Preentrenamiento Distribuido en Kaggle (`2× NVIDIA Tesla T4`, DDP)
+- **Duración total:** 7 horas, 43 minutos y 3 segundos (27,783 s).
+- **Tokens procesados:** 524.3M tokens (Batch Size 64, longitud de secuencia 1024).
+- **Continual QAT:** Warmup continuo FP16W (pasos 1–1200, 22,700 tok/s promedio) transicionando a cuantización ternaria estricta W1.58 con estimador STE (pasos 1201–8000, 18,286 tok/s promedio).
+- **Convergencia final:** $\text{Train Loss} = 2.88$, $\text{Val Loss} = 3.09$, $\mathbf{\text{Val Perplexity (PPL)} = 22.08}$.
+
+![Curva de Entrenamiento Hito 3.7](docs/assets/hito37_training_curve.svg)
+
+#### Rendimiento Standalone en CPU (`Intel Core i3-1115G4`, 2 núcleos físicos, `--cpu_threads 2`)
+Evaluación empírica con `/usr/bin/time -v ./trace_lm` midiendo 100 tokens generados:
+
+| Despacho ISA | Modo KV Cache | TTFT Greedy (ms) | Throughput Greedy (tok/s) | Sampling Throughput (tok/s) | Memoria RAM Pico (Max RSS) | Speedup vs Escalar |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **AVX2 + FMA** | **INT8 KV** (default) | **16.94 ± 2.17 ms** | **214.53 ± 27.31 tok/s** | **162.81 tok/s** | **36.22 MB** | **8.11× / 20.49× TTFT** |
+| **AVX2 + FMA** | **FP32 KV** (`--no_int8_kv`) | **18.17 ± 1.90 ms** | **237.26 ± 10.78 tok/s** | **171.48 tok/s** | **36.66 MB** | **9.76× / 20.79× TTFT** |
+| **Scalar C99** | **INT8 KV** | 347.09 ± 69.78 ms | 26.47 ± 3.48 tok/s | 20.89 tok/s | 36.22 MB | Línea Base Escalar INT8 |
+| **Scalar C99** | **FP32 KV** | 377.73 ± 74.55 ms | 24.30 ± 0.17 tok/s | 24.91 tok/s | 36.89 MB | Línea Base Escalar FP32 |
+
+#### Comandos de Reproducción Rápida
+```bash
+# 1. Compilar motor nativo C standalone
+OMP_NUM_THREADS=2 make clean && make all
+
+# 2. Inferencia en inglés (greedy)
+./trace_lm --prompt "Once upon a time, a curious engineer" --temp 0.0 --max_tokens 30
+
+# 3. Inferencia en español (sampling con Top-P y Repetition Penalty)
+./trace_lm --prompt "El algoritmo de inferencia profunda" --temp 0.7 --top_p 0.9 --rep_pen 1.15 --max_tokens 35
+```
 
 ---
 
