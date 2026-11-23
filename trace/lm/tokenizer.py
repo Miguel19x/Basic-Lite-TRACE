@@ -21,6 +21,10 @@ SPECIAL_EOS = 259
 FIRST_MERGE = 260
 NUM_MERGES = VOCAB_SIZE - FIRST_MERGE
 
+# Compatibilidad binaria y constantes universales
+MAGIC_TOK = b"TRTK"
+BASE_VOCAB_SIZE = FIRST_MERGE
+
 
 def _classify_cp(cp: int) -> int:
     """Clasificación determinista de codepoint UTF-8 sin regex."""
@@ -102,9 +106,9 @@ def pre_tokenize(text_bytes: bytes) -> Iterator[bytes]:
 
 
 class TRACETokenizer:
-    def __init__(self, bin_path: str = None):
-        self.vocab_size = VOCAB_SIZE
-        self.num_merges = NUM_MERGES
+    def __init__(self, bin_path: str = None, vocab_size: int = VOCAB_SIZE):
+        self.vocab_size = vocab_size
+        self.num_merges = self.vocab_size - FIRST_MERGE
         self.merges: dict[tuple[int, int], int] = {}
         self.pieces: list[bytes] = [bytes([i]) for i in range(256)]
         self.pieces.extend([b"<PAD>", b"<MASK>", b"<BOS>", b"<EOS>"])
@@ -114,34 +118,72 @@ class TRACETokenizer:
 
     def load(self, bin_path: str) -> None:
         with open(bin_path, "rb") as f:
-            hdr_bytes = f.read(32)
-            magic, ver, v_sz, n_m, pad, mask, bos, eos = struct.unpack("<8I", hdr_bytes)
-            assert magic == 0x4B545254, "Magic inválido"
-            assert ver == 1, "Versión de formato inválida"
-            assert v_sz == VOCAB_SIZE, "Vocab size incorrecto"
+            magic_bytes = f.read(4)
+            (magic,) = struct.unpack("<I", magic_bytes)
+            assert magic == 0x4B545254 or magic_bytes == MAGIC_TOK, "Magic inválido"
 
-            merges_bytes = f.read(n_m * 8)
-            merges_data = struct.unpack(f"<{n_m * 2}I", merges_bytes)
-            self.merges.clear()
-            for i in range(n_m):
-                left = merges_data[2 * i]
-                right = merges_data[2 * i + 1]
-                self.merges[(left, right)] = FIRST_MERGE + i
-            self.num_merges = n_m
+            w1_w2_bytes = f.read(8)
+            w1, w2 = struct.unpack("<2I", w1_w2_bytes)
 
-            self.pieces = []
-            for _ in range(VOCAB_SIZE):
-                (p_len,) = struct.unpack("<H", f.read(2))
-                self.pieces.append(f.read(p_len))
+            if w1 == 1:
+                # Formato estándar de 32 bytes (versión 1)
+                rest_bytes = f.read(20)
+                n_m, _pad, _mask, _bos, _eos = struct.unpack("<5I", rest_bytes)
+                v_sz = w2
+                self.vocab_size = v_sz
+                self.num_merges = n_m
+                self.merges.clear()
+                if n_m > 0:
+                    merges_bytes = f.read(n_m * 8)
+                    merges_data = struct.unpack(f"<{n_m * 2}I", merges_bytes)
+                    for i in range(n_m):
+                        left = merges_data[2 * i]
+                        right = merges_data[2 * i + 1]
+                        self.merges[(left, right)] = FIRST_MERGE + i
+
+                self.pieces = []
+                for _ in range(self.vocab_size):
+                    p_len_bytes = f.read(2)
+                    if not p_len_bytes:
+                        break
+                    (p_len,) = struct.unpack("<H", p_len_bytes)
+                    self.pieces.append(f.read(p_len))
+            else:
+                # Formato compacto (w1 = vocab_size, w2 = num_merges)
+                v_sz = w1
+                n_m = w2
+                assert v_sz >= FIRST_MERGE, "Vocab size incorrecto"
+                self.vocab_size = v_sz
+                self.num_merges = n_m
+                self.merges.clear()
+                self.pieces = [bytes([i]) for i in range(256)]
+                self.pieces.extend([b"<PAD>", b"<MASK>", b"<BOS>", b"<EOS>"])
+
+                if n_m > 0:
+                    merges_bytes = f.read(n_m * 4)
+                    merges_data = struct.unpack(f"<{n_m * 2}H", merges_bytes)
+                    for i in range(n_m):
+                        left = merges_data[2 * i]
+                        right = merges_data[2 * i + 1]
+                        if (left, right) not in self.merges:
+                            self.merges[(left, right)] = FIRST_MERGE + i
+                        p_l = self.pieces[left] if left < len(self.pieces) else b""
+                        p_r = self.pieces[right] if right < len(self.pieces) else b""
+                        self.pieces.append(p_l + p_r)
+
+                while len(self.pieces) < self.vocab_size:
+                    self.pieces.append(b"")
 
     def save(self, bin_path: str) -> None:
-        assert len(self.pieces) == VOCAB_SIZE, f"pieces debe tener longitud {VOCAB_SIZE}"
+        v_sz = len(self.pieces)
+        assert v_sz >= FIRST_MERGE, f"pieces debe tener longitud >= {FIRST_MERGE}"
+        self.vocab_size = v_sz
         sorted_merges = sorted(self.merges.items(), key=lambda item: item[1])
         num_m = len(sorted_merges)
         with open(bin_path, "wb") as f:
             f.write(struct.pack(
                 "<8I",
-                0x4B545254, 1, VOCAB_SIZE, num_m,
+                0x4B545254, 1, v_sz, num_m,
                 SPECIAL_PAD, SPECIAL_MASK, SPECIAL_BOS, SPECIAL_EOS
             ))
             for (left, right), token_id in sorted_merges:
@@ -245,10 +287,10 @@ class TRACETokenizer:
                         pair_to_seqs[new_p] = set()
                     pair_to_seqs[new_p].add(s_idx)
 
-        while len(pieces) < VOCAB_SIZE:
+        while len(pieces) < target_vocab_size:
             pieces.append(b"")
 
-        tok = cls()
+        tok = cls(vocab_size=target_vocab_size)
         tok.merges = {pair: FIRST_MERGE + i for i, pair in enumerate(merges_list)}
         tok.pieces = pieces
         tok.num_merges = len(merges_list)

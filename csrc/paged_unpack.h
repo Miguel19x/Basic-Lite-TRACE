@@ -9,7 +9,6 @@
 #define PAGED_UNPACK_H
 
 #include <stdint.h>
-#include <immintrin.h>
 
 #ifndef PAGED_HEADER_DEFINED
 #define PAGED_HEADER_DEFINED
@@ -25,6 +24,9 @@ typedef struct {
 } PagedHeader;
 #pragma pack(pop)
 #endif
+
+#if defined(__AVX2__)
+#include <immintrin.h>
 
 // Desempaqueta 32 pesos ternarios contiguos codificados a 2-bit en formato fast
 // Mapeo: 0 -> -1, 1 -> 0, 2 -> +1
@@ -55,5 +57,6 @@ static inline __m256i avx2_unpack_32_weights_fast(const uint8_t* p) {
     __m256i codes = _mm256_and_si256(combined, _mm256_set1_epi8(0x03));
     return _mm256_sub_epi8(codes, _mm256_set1_epi8(1));
 }
+#endif
 
 #endif // PAGED_UNPACK_H

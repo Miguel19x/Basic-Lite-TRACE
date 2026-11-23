@@ -14,8 +14,8 @@
 typedef struct {
     uint32_t magic;      // 0x4B545254 ("TRTK")
     uint32_t version;    // 1
-    uint32_t vocab_size; // 4096
-    uint32_t num_merges; // 3836
+    uint32_t vocab_size; // Tamaño dinámico (e.g. 4096, 8192)
+    uint32_t num_merges; // Número de merges BPE
     uint32_t pad_id;
     uint32_t mask_id;
     uint32_t bos_id;
@@ -36,14 +36,14 @@ size_t trace_tokenizer_sizeof(void) {
     return sizeof(TraceTokenizer);
 }
 
-static inline uint32_t hash_pair(uint32_t left, uint32_t right) {
+static inline uint32_t hash_pair(uint32_t left, uint32_t right, int hash_size) {
     uint64_t key = ((uint64_t)left << 32) | right;
     key ^= key >> 33;
     key *= 0xff51afd7ed558ccdULL;
     key ^= key >> 33;
     key *= 0xc4ceb9fe1a85ec53ULL;
     key ^= key >> 33;
-    return (uint32_t)key & (TRACE_HASH_SIZE - 1);
+    return (uint32_t)key & (uint32_t)(hash_size - 1);
 }
 
 static inline int utf8_decode(const uint8_t* s, int len, uint32_t* cp, int* cp_len) {
@@ -86,13 +86,28 @@ static inline CodepointCat classify_cp(uint32_t cp) {
 
 void trace_tokenizer_free(TraceTokenizer* tok) {
     if (!tok) return;
-    for (int i = 0; i < TRACE_VOCAB_SIZE; i++) {
-        if (tok->pieces[i].bytes) {
-            free(tok->pieces[i].bytes);
-            tok->pieces[i].bytes = NULL;
+    if (tok->pieces) {
+        for (int i = 0; i < tok->vocab_size; i++) {
+            if (tok->pieces[i].bytes) {
+                free(tok->pieces[i].bytes);
+                tok->pieces[i].bytes = NULL;
+            }
+            tok->pieces[i].len = 0;
         }
-        tok->pieces[i].len = 0;
+        free(tok->pieces);
+        tok->pieces = NULL;
     }
+    if (tok->hash_table) {
+        free(tok->hash_table);
+        tok->hash_table = NULL;
+    }
+    if (tok->merges) {
+        free(tok->merges);
+        tok->merges = NULL;
+    }
+    tok->vocab_size = 0;
+    tok->num_merges = 0;
+    tok->hash_size = 0;
 }
 
 int trace_tokenizer_load(TraceTokenizer* tok, const char* bin_path) {
@@ -102,68 +117,168 @@ int trace_tokenizer_load(TraceTokenizer* tok, const char* bin_path) {
     FILE* f = fopen(bin_path, "rb");
     if (!f) return -2;
 
-    TokenizerHeader hdr;
-    if (fread(&hdr, sizeof(TokenizerHeader), 1, f) != 1) {
+    uint32_t magic = 0;
+    if (fread(&magic, sizeof(uint32_t), 1, f) != 1 || magic != 0x4B545254) {
         fclose(f);
         return -3;
     }
 
-    if (hdr.magic != 0x4B545254 || hdr.version != 1 || hdr.vocab_size != TRACE_VOCAB_SIZE) {
+    uint32_t w1 = 0, w2 = 0;
+    if (fread(&w1, sizeof(uint32_t), 1, f) != 1 || fread(&w2, sizeof(uint32_t), 1, f) != 1) {
+        fclose(f);
+        return -3;
+    }
+
+    int is_compact = 0;
+    if (w1 == 1) {
+        // Formato estándar de 32 bytes (versión 1)
+        uint32_t rest[5];
+        if (fread(rest, sizeof(uint32_t), 5, f) != 5) {
+            fclose(f);
+            return -4;
+        }
+        tok->vocab_size = (int)w2;
+        tok->num_merges = (int)rest[0];
+    } else if (w1 >= TRACE_FIRST_MERGE) {
+        // Formato compacto (w1 = vocab_size, w2 = num_merges)
+        is_compact = 1;
+        tok->vocab_size = (int)w1;
+        tok->num_merges = (int)w2;
+    } else {
         fclose(f);
         return -4;
     }
 
-    if (hdr.num_merges > TRACE_NUM_MERGES) {
+    if (tok->num_merges > 0) {
+        tok->merges = (TraceMerge*)malloc(sizeof(TraceMerge) * (size_t)tok->num_merges);
+        if (!tok->merges) {
+            fclose(f);
+            return -5;
+        }
+
+        if (is_compact) {
+            for (int i = 0; i < tok->num_merges; i++) {
+                uint16_t pair[2];
+                if (fread(pair, sizeof(uint16_t), 2, f) != 2) {
+                    trace_tokenizer_free(tok);
+                    fclose(f);
+                    return -5;
+                }
+                tok->merges[i].left = pair[0];
+                tok->merges[i].right = pair[1];
+            }
+        } else {
+            if (fread(tok->merges, sizeof(TraceMerge), (size_t)tok->num_merges, f) != (size_t)tok->num_merges) {
+                trace_tokenizer_free(tok);
+                fclose(f);
+                return -5;
+            }
+        }
+    }
+
+    // Tabla hash O(1) con tamaño potencia de 2 >= num_merges * 4
+    int h_sz = 1024;
+    while (h_sz < tok->num_merges * 4) {
+        h_sz <<= 1;
+    }
+    tok->hash_size = h_sz;
+    tok->hash_table = (TraceMergeHashEntry*)malloc(sizeof(TraceMergeHashEntry) * (size_t)h_sz);
+    if (!tok->hash_table) {
+        trace_tokenizer_free(tok);
         fclose(f);
         return -5;
     }
 
-    tok->vocab_size = hdr.vocab_size;
-    tok->num_merges = hdr.num_merges;
-
-    if (fread(tok->merges, sizeof(TraceMerge), hdr.num_merges, f) != hdr.num_merges) {
-        fclose(f);
-        return -5;
-    }
-
-    // Inicializar tabla hash O(1) con resolución de colisiones lineal
-    for (int i = 0; i < TRACE_HASH_SIZE; i++) {
+    for (int i = 0; i < h_sz; i++) {
         tok->hash_table[i].rank = -1;
     }
     for (int i = 0; i < tok->num_merges; i++) {
         uint32_t l = tok->merges[i].left;
         uint32_t r = tok->merges[i].right;
-        uint32_t h = hash_pair(l, r);
+        uint32_t h = hash_pair(l, r, h_sz);
+        int already_present = 0;
+        uint32_t orig_h = h;
         while (tok->hash_table[h].rank != -1) {
-            h = (h + 1) & (TRACE_HASH_SIZE - 1);
+            if (tok->hash_table[h].left == l && tok->hash_table[h].right == r) {
+                already_present = 1;
+                break;
+            }
+            h = (h + 1) & (uint32_t)(h_sz - 1);
+            if (h == orig_h) break;
         }
-        tok->hash_table[h].left = l;
-        tok->hash_table[h].right = r;
-        tok->hash_table[h].rank = i;
+        if (!already_present) {
+            tok->hash_table[h].left = l;
+            tok->hash_table[h].right = r;
+            tok->hash_table[h].rank = i;
+        }
     }
 
-    for (int i = 0; i < TRACE_VOCAB_SIZE; i++) {
-        uint16_t len = 0;
-        if (fread(&len, sizeof(uint16_t), 1, f) != 1) {
-            trace_tokenizer_free(tok);
-            fclose(f);
-            return -6;
+    tok->pieces = (TraceTokenPiece*)calloc((size_t)tok->vocab_size, sizeof(TraceTokenPiece));
+    if (!tok->pieces) {
+        trace_tokenizer_free(tok);
+        fclose(f);
+        return -6;
+    }
+
+    if (is_compact) {
+        // Reconstrucción determinista de piezas a partir de bytes base y merges
+        for (int i = 0; i < 256; i++) {
+            tok->pieces[i].len = 1;
+            tok->pieces[i].bytes = (uint8_t*)malloc(2);
+            if (tok->pieces[i].bytes) {
+                tok->pieces[i].bytes[0] = (uint8_t)i;
+                tok->pieces[i].bytes[1] = 0;
+            }
         }
-        tok->pieces[i].len = len;
-        tok->pieces[i].bytes = (uint8_t*)malloc(len + 1);
-        if (!tok->pieces[i].bytes) {
-            trace_tokenizer_free(tok);
-            fclose(f);
-            return -7;
+        const char* specials[4] = {"<PAD>", "<MASK>", "<BOS>", "<EOS>"};
+        for (int i = 0; i < 4; i++) {
+            int idx = 256 + i;
+            if (idx < tok->vocab_size) {
+                int slen = (int)strlen(specials[i]);
+                tok->pieces[idx].len = (uint16_t)slen;
+                tok->pieces[idx].bytes = (uint8_t*)malloc((size_t)slen + 1);
+                if (tok->pieces[idx].bytes) {
+                    memcpy(tok->pieces[idx].bytes, specials[i], (size_t)slen + 1);
+                }
+            }
         }
-        if (len > 0) {
-            if (fread(tok->pieces[i].bytes, 1, len, f) != (size_t)len) {
+        for (int i = 0; i < tok->num_merges; i++) {
+            int idx = TRACE_FIRST_MERGE + i;
+            if (idx >= tok->vocab_size) break;
+            uint32_t l = tok->merges[i].left;
+            uint32_t r = tok->merges[i].right;
+            int l_len = (l < (uint32_t)idx && tok->pieces[l].bytes) ? (int)tok->pieces[l].len : 0;
+            int r_len = (r < (uint32_t)idx && tok->pieces[r].bytes) ? (int)tok->pieces[r].len : 0;
+            tok->pieces[idx].len = (uint16_t)(l_len + r_len);
+            tok->pieces[idx].bytes = (uint8_t*)malloc((size_t)l_len + (size_t)r_len + 1);
+            if (tok->pieces[idx].bytes) {
+                if (l_len > 0) memcpy(tok->pieces[idx].bytes, tok->pieces[l].bytes, (size_t)l_len);
+                if (r_len > 0) memcpy(tok->pieces[idx].bytes + l_len, tok->pieces[r].bytes, (size_t)r_len);
+                tok->pieces[idx].bytes[l_len + r_len] = 0;
+            }
+        }
+    } else {
+        for (int i = 0; i < tok->vocab_size; i++) {
+            uint16_t len = 0;
+            if (fread(&len, sizeof(uint16_t), 1, f) != 1) {
+                break;
+            }
+            tok->pieces[i].len = len;
+            tok->pieces[i].bytes = (uint8_t*)malloc((size_t)len + 1);
+            if (!tok->pieces[i].bytes) {
                 trace_tokenizer_free(tok);
                 fclose(f);
                 return -7;
             }
+            if (len > 0) {
+                if (fread(tok->pieces[i].bytes, 1, len, f) != (size_t)len) {
+                    trace_tokenizer_free(tok);
+                    fclose(f);
+                    return -7;
+                }
+            }
+            tok->pieces[i].bytes[len] = '\0';
         }
-        tok->pieces[i].bytes[len] = '\0';
     }
 
     fclose(f);
@@ -171,12 +286,14 @@ int trace_tokenizer_load(TraceTokenizer* tok, const char* bin_path) {
 }
 
 static inline int find_merge_rank(const TraceTokenizer* tok, int32_t left, int32_t right) {
-    uint32_t h = hash_pair((uint32_t)left, (uint32_t)right);
+    if (!tok || !tok->hash_table || tok->hash_size <= 0) return -1;
+    uint32_t h = hash_pair((uint32_t)left, (uint32_t)right, tok->hash_size);
+    uint32_t mask = (uint32_t)(tok->hash_size - 1);
     while (tok->hash_table[h].rank != -1) {
         if ((int32_t)tok->hash_table[h].left == left && (int32_t)tok->hash_table[h].right == right) {
             return tok->hash_table[h].rank;
         }
-        h = (h + 1) & (TRACE_HASH_SIZE - 1);
+        h = (h + 1) & mask;
     }
     return -1;
 }
@@ -348,4 +465,33 @@ int trace_tokenizer_decode(
 
     out_text[total_bytes] = '\0';
     return total_bytes;
+}
+
+TraceTokenizer* trace_tok_load(const char* bin_path) {
+    if (!bin_path) return NULL;
+    TraceTokenizer* tok = (TraceTokenizer*)malloc(sizeof(TraceTokenizer));
+    if (!tok) return NULL;
+    if (trace_tokenizer_load(tok, bin_path) != 0) {
+        free(tok);
+        return NULL;
+    }
+    return tok;
+}
+
+void trace_tok_free(TraceTokenizer* tok) {
+    if (tok) {
+        trace_tokenizer_free(tok);
+        free(tok);
+    }
+}
+
+int trace_tok_encode(
+    const TraceTokenizer* tok,
+    const char* text,
+    size_t text_len,
+    int32_t* out_tokens,
+    int max_tokens
+) {
+    if (!tok || !text || !out_tokens || max_tokens <= 0) return 0;
+    return trace_tokenizer_encode(tok, (const uint8_t*)text, (int)text_len, out_tokens, max_tokens);
 }

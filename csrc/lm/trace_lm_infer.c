@@ -7,51 +7,11 @@
 
 #include "trace_lm.h"
 #include "trace_lm_kv.h"
-#include "../paged_unpack.h"
+#include "paged_dispatch.h"
 #include "../trace_math.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <immintrin.h>
-
-// Declaracion externa de kernel GEMM rapido para capas BitLinear con sub_ln + INT8
-extern void paged_direct_matmul_fast_c_multi(
-    const int8_t* x,
-    const uint8_t* const* page_blobs,
-    int64_t num_pages,
-    int32_t* out,
-    int64_t M,
-    int64_t K,
-    int64_t total_out_features
-);
-
-static inline float hsum_ps_avx2(__m256 v) {
-    __m128 lo = _mm256_castps256_ps128(v);
-    __m128 hi = _mm256_extractf128_ps(v, 1);
-    __m128 s = _mm_add_ps(lo, hi);
-    s = _mm_add_ps(s, _mm_movehl_ps(s, s));
-    s = _mm_add_ss(s, _mm_movehdup_ps(s));
-    return _mm_cvtss_f32(s);
-}
-
-static inline const uint8_t* paged_linear_get_row_packed(
-    const TraceLMPagedLinear* lin,
-    int r,
-    int* out_cols
-) {
-    for (int p = 0; p < lin->num_pages; ++p) {
-        const uint8_t* blob = lin->page_ptrs[p];
-        const PagedHeader* hdr = (const PagedHeader*)blob;
-        if ((uint32_t)r >= hdr->row_start && (uint32_t)r < hdr->row_start + hdr->rows) {
-            uint32_t local_r = (uint32_t)r - hdr->row_start;
-            int64_t padded_cols = ((int64_t)hdr->cols + 31) / 32 * 32;
-            int64_t row_stride_bytes = padded_cols >> 2;
-            if (out_cols) *out_cols = hdr->cols;
-            return blob + sizeof(PagedHeader) + local_r * row_stride_bytes;
-        }
-    }
-    return NULL;
-}
 
 TraceLMWorkspace* trace_lm_workspace_create(const TraceLMConfig* cfg, int max_batch_seq) {
     if (!cfg || max_batch_seq <= 0) return NULL;
@@ -186,110 +146,6 @@ static void paged_linear_forward_act_int8(
     }
 }
 
-// Absorcion de W_uk en registros AVX2 (0 matrices FP32 en RAM)
-// W_uk: [n_heads * qk_nope_head_dim, kv_lora_rank]
-// q_c_absorbed[h, c] = sum_d (q_c[h, d] * W_uk[h * d_h + d, c]) * scale_uk
-static void absorb_w_uk_avx2(
-    const float* q_c,
-    const TraceLMPagedLinear* w_uk,
-    float* q_c_abs,
-    int n_heads,
-    int qk_nope_head_dim,
-    int kv_lora_rank,
-    int S
-) {
-    for (int t = 0; t < S; ++t) {
-        for (int h = 0; h < n_heads; ++h) {
-            float* out_hc = q_c_abs + (t * n_heads + h) * kv_lora_rank;
-            memset(out_hc, 0, sizeof(float) * kv_lora_rank);
-
-            for (int d = 0; d < qk_nope_head_dim; ++d) {
-                int r = h * qk_nope_head_dim + d;
-                const uint8_t* row_p = paged_linear_get_row_packed(w_uk, r, NULL);
-                if (!row_p) continue;
-
-                float v = q_c[(t * n_heads + h) * qk_nope_head_dim + d];
-                if (v == 0.0f) continue;
-                __m256 v_vec = _mm256_set1_ps(v);
-
-                for (int k = 0; k < kv_lora_rank; k += 32) {
-                    __m256i w_i8 = avx2_unpack_32_weights_fast(row_p + (k >> 2));
-                    __m128i lo16 = _mm256_castsi256_si128(w_i8);
-                    __m128i hi16 = _mm256_extracti128_si256(w_i8, 1);
-
-                    __m256 w0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo16));
-                    __m256 w1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(lo16, 8)));
-                    __m256 w2 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi16));
-                    __m256 w3 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(hi16, 8)));
-
-                    _mm256_storeu_ps(out_hc + k, _mm256_fmadd_ps(v_vec, w0, _mm256_loadu_ps(out_hc + k)));
-                    _mm256_storeu_ps(out_hc + k + 8, _mm256_fmadd_ps(v_vec, w1, _mm256_loadu_ps(out_hc + k + 8)));
-                    _mm256_storeu_ps(out_hc + k + 16, _mm256_fmadd_ps(v_vec, w2, _mm256_loadu_ps(out_hc + k + 16)));
-                    _mm256_storeu_ps(out_hc + k + 24, _mm256_fmadd_ps(v_vec, w3, _mm256_loadu_ps(out_hc + k + 24)));
-                }
-            }
-
-            for (int k = 0; k < kv_lora_rank; ++k) {
-                out_hc[k] *= w_uk->scale;
-            }
-        }
-    }
-}
-
-// Absorcion de W_uv en registros AVX2 (0 matrices FP32 en RAM)
-// W_uv: [n_heads * v_head_dim, kv_lora_rank]
-// o_heads[h, v] = (o_latent[h, :] . W_uv[h * d_v + v, :]) * scale_uv
-static void absorb_w_uv_avx2(
-    const float* o_latent,
-    const TraceLMPagedLinear* w_uv,
-    float* o_heads,
-    int n_heads,
-    int v_head_dim,
-    int kv_lora_rank,
-    int S
-) {
-    for (int t = 0; t < S; ++t) {
-        for (int h = 0; h < n_heads; ++h) {
-            const float* lat_h = o_latent + (t * n_heads + h) * kv_lora_rank;
-            float* out_h = o_heads + (t * n_heads + h) * v_head_dim;
-
-            for (int v = 0; v < v_head_dim; ++v) {
-                int r = h * v_head_dim + v;
-                const uint8_t* row_p = paged_linear_get_row_packed(w_uv, r, NULL);
-                if (!row_p) {
-                    out_h[v] = 0.0f;
-                    continue;
-                }
-
-                __m256 acc0 = _mm256_setzero_ps();
-                __m256 acc1 = _mm256_setzero_ps();
-                __m256 acc2 = _mm256_setzero_ps();
-                __m256 acc3 = _mm256_setzero_ps();
-
-                for (int k = 0; k < kv_lora_rank; k += 32) {
-                    __m256i w_i8 = avx2_unpack_32_weights_fast(row_p + (k >> 2));
-                    __m128i lo16 = _mm256_castsi256_si128(w_i8);
-                    __m128i hi16 = _mm256_extracti128_si256(w_i8, 1);
-
-                    __m256 w0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo16));
-                    __m256 w1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(lo16, 8)));
-                    __m256 w2 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi16));
-                    __m256 w3 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(hi16, 8)));
-
-                    acc0 = _mm256_fmadd_ps(w0, _mm256_loadu_ps(lat_h + k), acc0);
-                    acc1 = _mm256_fmadd_ps(w1, _mm256_loadu_ps(lat_h + k + 8), acc1);
-                    acc2 = _mm256_fmadd_ps(w2, _mm256_loadu_ps(lat_h + k + 16), acc2);
-                    acc3 = _mm256_fmadd_ps(w3, _mm256_loadu_ps(lat_h + k + 24), acc3);
-                }
-
-                __m256 sum256 = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
-                float dot = hsum_ps_avx2(sum256);
-                out_h[v] = dot * w_uv->scale;
-            }
-        }
-    }
-}
-
 // Aplicacion de RoPE intercalado: output[0::2] = x1*c - x2*s, output[1::2] = x2*c + x1*s
 static void apply_rope_c(
     float* v,
@@ -394,8 +250,8 @@ int trace_lm_forward(
             }
         }
 
-        // 4.7. Absorcion 1: W_uk^T q_c en registros AVX2
-        absorb_w_uk_avx2(ws->q_c, &layer->w_uk, ws->q_c_absorbed, n_heads, qk_nope_head_dim, kv_lora_rank, S);
+        // 4.7. Absorcion 1: W_uk^T q_c via kernel despachado (0 matrices FP32 en RAM)
+        paged_absorb_uk_f32(ws->q_c, layer->w_uk.page_ptrs, layer->w_uk.num_pages, layer->w_uk.scale, ws->q_c_absorbed, n_heads, qk_nope_head_dim, kv_lora_rank, S);
 
         // 4.8. Atencion Causal Multi-Head Latente
         for (int t = 0; t < S; ++t) {
@@ -413,8 +269,8 @@ int trace_lm_forward(
                     trace_lm_kv_get_c_kv(kv, l, s, c_kv_s);
                     const float* k_pe_s = trace_lm_kv_get_k_pe(kv, l, s);
 
-                    float dot_c = avx2_dot_product_f32(q_c_abs_h, c_kv_s, kv_lora_rank);
-                    float dot_pe = avx2_dot_product_f32(q_pe_h, k_pe_s, qk_rope_head_dim);
+                    float dot_c = trace_dot_f32(q_c_abs_h, c_kv_s, kv_lora_rank);
+                    float dot_pe = trace_dot_f32(q_pe_h, k_pe_s, qk_rope_head_dim);
                     float sc = (dot_c + dot_pe) * attn_scale;
                     scores_h[s] = sc;
                     if (sc > max_sc) max_sc = sc;
@@ -441,18 +297,13 @@ int trace_lm_forward(
                     if (p == 0.0f) continue;
                     float c_kv_s[kv_lora_rank];
                     trace_lm_kv_get_c_kv(kv, l, s, c_kv_s);
-                    __m256 p_vec = _mm256_set1_ps(p);
-                    for (int k = 0; k < kv_lora_rank; k += 8) {
-                        __m256 acc = _mm256_loadu_ps(o_lat_h + k);
-                        __m256 c_vec = _mm256_loadu_ps(c_kv_s + k);
-                        _mm256_storeu_ps(o_lat_h + k, _mm256_fmadd_ps(p_vec, c_vec, acc));
-                    }
+                    trace_axpy_f32(o_lat_h, p, c_kv_s, kv_lora_rank);
                 }
             }
         }
 
-        // 4.9. Absorcion 2: W_uv . o_latent en registros AVX2
-        absorb_w_uv_avx2(ws->o_latent, &layer->w_uv, ws->o_heads, n_heads, v_head_dim, kv_lora_rank, S);
+        // 4.9. Absorcion 2: W_uv . o_latent via kernel despachado
+        paged_absorb_uv_f32(ws->o_latent, layer->w_uv.page_ptrs, layer->w_uv.num_pages, layer->w_uv.scale, ws->o_heads, n_heads, v_head_dim, kv_lora_rank, S);
 
         // 4.10. Proyeccion de salida: w_out
         paged_linear_forward_act_int8(ws->o_heads, &layer->w_out, ws->attn_out, S, ws, eps);
@@ -495,7 +346,7 @@ int trace_lm_forward(
         const float* x_last = ws->x_norm + (S - 1) * d_model;
         for (int v = 0; v < vocab_size; ++v) {
             const float* emb_v = model->lm_head_w + v * d_model;
-            out_logits[v] = avx2_dot_product_f32(x_last, emb_v, d_model);
+            out_logits[v] = trace_dot_f32(x_last, emb_v, d_model);
         }
     } else {
         // Escribe logits para todos los S tokens nuevos
@@ -504,7 +355,7 @@ int trace_lm_forward(
             float* logits_t = out_logits + t * vocab_size;
             for (int v = 0; v < vocab_size; ++v) {
                 const float* emb_v = model->lm_head_w + v * d_model;
-                logits_t[v] = avx2_dot_product_f32(x_t, emb_v, d_model);
+                logits_t[v] = trace_dot_f32(x_t, emb_v, d_model);
             }
         }
     }

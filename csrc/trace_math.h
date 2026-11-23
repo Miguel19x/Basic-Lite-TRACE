@@ -10,6 +10,8 @@
 
 #include <math.h>
 #include <stdint.h>
+
+#if defined(__AVX2__)
 #include <immintrin.h>
 
 static inline void rms_norm(const float* x, const float* w, float* y, int d, float eps) {
@@ -53,7 +55,6 @@ static inline void rms_norm(const float* x, const float* w, float* y, int d, flo
 static inline float avx2_dot_product_f32(const float* a, const float* b, int n) {
     __m256 sum256 = _mm256_setzero_ps();
     int d = 0;
-    // Consistente con -ffp-contract=off: _mm256_add_ps + _mm256_mul_ps sin fmadd
     for (; d + 8 <= n; d += 8) {
         __m256 va = _mm256_loadu_ps(a + d);
         __m256 vb = _mm256_loadu_ps(b + d);
@@ -71,5 +72,30 @@ static inline float avx2_dot_product_f32(const float* a, const float* b, int n) 
     }
     return acc;
 }
+
+#else
+
+static inline void rms_norm(const float* x, const float* w, float* y, int d, float eps) {
+    double sum_sq = 0.0;
+    for (int i = 0; i < d; ++i) {
+        sum_sq += (double)x[i] * (double)x[i];
+    }
+    float rstd = (float)(1.0 / sqrt(sum_sq / (double)d + (double)eps));
+    if (w) {
+        for (int i = 0; i < d; ++i) y[i] = x[i] * rstd * w[i];
+    } else {
+        for (int i = 0; i < d; ++i) y[i] = x[i] * rstd;
+    }
+}
+
+static inline float avx2_dot_product_f32(const float* a, const float* b, int n) {
+    float acc = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        acc += a[i] * b[i];
+    }
+    return acc;
+}
+
+#endif
 
 #endif // TRACE_MATH_H

@@ -63,7 +63,14 @@ def export_lm_checkpoint(
         if "cfg" in ckpt:
             cfg = TRACELMConfig(**ckpt["cfg"]) if isinstance(ckpt["cfg"], dict) else ckpt["cfg"]
         else:
-            cfg = TRACELMConfig.preset_25m() if preset == "25m" else TRACELMConfig()
+            if preset == "25m":
+                cfg = TRACELMConfig.preset_25m()
+            elif preset == "25m-bi":
+                cfg = TRACELMConfig.preset_25m_bilingual()
+            elif preset == "45m-bi":
+                cfg = TRACELMConfig.preset_45m_bilingual()
+            else:
+                cfg = TRACELMConfig()
         cfg.quantize_weights_enabled = True
         model = TRACELanguageModel(cfg)
         if "model_state" in ckpt:
@@ -76,7 +83,14 @@ def export_lm_checkpoint(
         assert len(missing) == 0 and len(unexpected) == 0, f"Discrepancia state_dict: {missing=}, {unexpected=}"
         print(f"Pesos cargados exitosamente desde {checkpoint_path}")
     else:
-        cfg = TRACELMConfig.preset_25m() if preset == "25m" else TRACELMConfig()
+        if preset == "25m":
+            cfg = TRACELMConfig.preset_25m()
+        elif preset == "25m-bi":
+            cfg = TRACELMConfig.preset_25m_bilingual()
+        elif preset == "45m-bi":
+            cfg = TRACELMConfig.preset_45m_bilingual()
+        else:
+            cfg = TRACELMConfig()
         cfg.quantize_weights_enabled = True
         model = TRACELanguageModel(cfg)
 
@@ -153,7 +167,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Exportador Paged BitCOS v1.1 — TRACELanguageModel")
     parser.add_argument("--checkpoint", type=str, default=None, help="Ruta al checkpoint .pt opcional")
     parser.add_argument("--output", type=str, default="checkpoints/trace_lm_25m_paged_bitcos.bin", help="Ruta de salida .bin")
-    parser.add_argument("--preset", type=str, default="25m", choices=["25m", "compact"], help="Preset de arquitectura")
+    parser.add_argument("--preset", type=str, default="25m", choices=["25m", "25m-bi", "45m-bi", "compact"], help="Preset de arquitectura")
     parser.add_argument("--format", type=str, default="fast", choices=["fast", "compact"], help="Formato de página")
     parser.add_argument("--page_size", type=int, default=4096, help="Tamaño de página en bytes")
     parser.add_argument("--no_validate", action="store_true", help="Omitir auditoría de recarga")

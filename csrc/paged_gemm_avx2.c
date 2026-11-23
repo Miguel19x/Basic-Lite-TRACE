@@ -5,6 +5,9 @@
  * Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
  */
 
+#if defined(TRACE_ENABLE_AVX2)
+
+#include "paged_dispatch.h"
 #include "trace_infer.h"
 #include "paged_unpack.h"
 #include <stdint.h>
@@ -20,6 +23,15 @@ static inline int32_t hsum_epi32_avx2(__m256i v) {
     acc128 = _mm_add_epi32(acc128, _mm_shuffle_epi32(acc128, _MM_SHUFFLE(1, 0, 3, 2)));
     acc128 = _mm_add_epi32(acc128, _mm_shuffle_epi32(acc128, _MM_SHUFFLE(2, 3, 0, 1)));
     return _mm_cvtsi128_si32(acc128);
+}
+
+static inline float hsum_ps_avx2(__m256 v) {
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    __m128 s = _mm_add_ps(lo, hi);
+    s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    s = _mm_add_ss(s, _mm_movehdup_ps(s));
+    return _mm_cvtss_f32(s);
 }
 
 static inline int32_t avx2_dot_product_packed_fast(
@@ -75,7 +87,25 @@ static inline int32_t avx2_dot_product_dense_int8(
     return acc;
 }
 
-void paged_direct_matmul_fast_c(
+static inline const uint8_t* paged_get_row_packed_avx2(
+    const uint8_t* const* page_ptrs,
+    int num_pages,
+    int r
+) {
+    for (int p = 0; p < num_pages; ++p) {
+        const uint8_t* blob = page_ptrs[p];
+        const PagedHeader* hdr = (const PagedHeader*)blob;
+        if ((uint32_t)r >= hdr->row_start && (uint32_t)r < hdr->row_start + hdr->rows) {
+            uint32_t local_r = (uint32_t)r - hdr->row_start;
+            int64_t padded_cols = ((int64_t)hdr->cols + 31) / 32 * 32;
+            int64_t row_stride_bytes = padded_cols >> 2;
+            return blob + sizeof(PagedHeader) + local_r * row_stride_bytes;
+        }
+    }
+    return NULL;
+}
+
+void paged_direct_matmul_fast_c_avx2(
     const int8_t* x,
     const uint8_t* page_blob,
     int32_t* out,
@@ -101,7 +131,7 @@ void paged_direct_matmul_fast_c(
     }
 }
 
-void paged_direct_matmul_fast_c_multi(
+void paged_direct_matmul_fast_c_multi_avx2(
     const int8_t* x,
     const uint8_t* const* page_blobs,
     int64_t num_pages,
@@ -129,7 +159,6 @@ void paged_direct_matmul_fast_c_multi(
             const int8_t* x_row = x;
             int32_t* out_row = out + row_start;
             int64_t r = 0;
-            // Camino optimizado M=1: procesar 4 filas simultáneas reutilizando x_vec
             for (; r + 4 <= (int64_t)rows; r += 4) {
                 const uint8_t* w0_p = payload + (r + 0) * row_stride_bytes;
                 const uint8_t* w1_p = payload + (r + 1) * row_stride_bytes;
@@ -181,7 +210,6 @@ void paged_direct_matmul_fast_c_multi(
                 out_row[r] = avx2_dot_product_packed_fast(x_row, w_row_packed, cols);
             }
         } else {
-            // Camino M > 1: Tiling por bloques K=512 para no desbordar la pila en capas grandes
             for (int64_t r = 0; r < (int64_t)rows; ++r) {
                 const uint8_t* w_row_packed = payload + r * row_stride_bytes;
                 int8_t w_unpacked[K_TILE_SIZE] __attribute__((aligned(32)));
@@ -216,7 +244,7 @@ void paged_direct_matmul_fast_c_multi(
     }
 }
 
-void paged_lowrank_matmul_row_c(
+void paged_lowrank_matmul_row_c_avx2(
     const int8_t* x,
     const uint8_t* w_packed,
     int32_t* out,
@@ -234,7 +262,7 @@ void paged_lowrank_matmul_row_c(
     }
 }
 
-void ternary_addsub_cpu_kernel(
+void ternary_addsub_cpu_kernel_avx2(
     const int8_t* x,
     const int8_t* w,
     int32_t* out,
@@ -253,3 +281,162 @@ void ternary_addsub_cpu_kernel(
         }
     }
 }
+
+void paged_absorb_uk_f32_avx2(
+    const float* q_c,
+    const uint8_t* const* page_ptrs,
+    int num_pages,
+    float scale,
+    float* q_c_abs,
+    int n_heads,
+    int qk_nope_head_dim,
+    int kv_lora_rank,
+    int S
+) {
+    for (int t = 0; t < S; ++t) {
+        for (int h = 0; h < n_heads; ++h) {
+            float* out_hc = q_c_abs + (t * n_heads + h) * kv_lora_rank;
+            memset(out_hc, 0, sizeof(float) * kv_lora_rank);
+
+            for (int d = 0; d < qk_nope_head_dim; ++d) {
+                int r = h * qk_nope_head_dim + d;
+                const uint8_t* row_p = paged_get_row_packed_avx2(page_ptrs, num_pages, r);
+                if (!row_p) continue;
+
+                float v = q_c[(t * n_heads + h) * qk_nope_head_dim + d];
+                if (v == 0.0f) continue;
+                __m256 v_vec = _mm256_set1_ps(v);
+
+                int k = 0;
+                for (; k + 32 <= kv_lora_rank; k += 32) {
+                    __m256i w_i8 = avx2_unpack_32_weights_fast(row_p + (k >> 2));
+                    __m128i lo16 = _mm256_castsi256_si128(w_i8);
+                    __m128i hi16 = _mm256_extracti128_si256(w_i8, 1);
+
+                    __m256 w0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo16));
+                    __m256 w1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(lo16, 8)));
+                    __m256 w2 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi16));
+                    __m256 w3 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(hi16, 8)));
+
+                    _mm256_storeu_ps(out_hc + k, _mm256_fmadd_ps(v_vec, w0, _mm256_loadu_ps(out_hc + k)));
+                    _mm256_storeu_ps(out_hc + k + 8, _mm256_fmadd_ps(v_vec, w1, _mm256_loadu_ps(out_hc + k + 8)));
+                    _mm256_storeu_ps(out_hc + k + 16, _mm256_fmadd_ps(v_vec, w2, _mm256_loadu_ps(out_hc + k + 16)));
+                    _mm256_storeu_ps(out_hc + k + 24, _mm256_fmadd_ps(v_vec, w3, _mm256_loadu_ps(out_hc + k + 24)));
+                }
+
+                // Cola escalar segura para dimensiones no divisibles entre 32
+                for (; k < kv_lora_rank; ++k) {
+                    uint8_t byte_val = row_p[k >> 2];
+                    int shift = (k & 3) * 2;
+                    int32_t w = ((int32_t)((byte_val >> shift) & 0x03)) - 1;
+                    out_hc[k] += v * (float)w;
+                }
+            }
+
+            for (int k = 0; k < kv_lora_rank; ++k) {
+                out_hc[k] *= scale;
+            }
+        }
+    }
+}
+
+void paged_absorb_uv_f32_avx2(
+    const float* o_latent,
+    const uint8_t* const* page_ptrs,
+    int num_pages,
+    float scale,
+    float* o_heads,
+    int n_heads,
+    int v_head_dim,
+    int kv_lora_rank,
+    int S
+) {
+    for (int t = 0; t < S; ++t) {
+        for (int h = 0; h < n_heads; ++h) {
+            const float* lat_h = o_latent + (t * n_heads + h) * kv_lora_rank;
+            float* out_h = o_heads + (t * n_heads + h) * v_head_dim;
+
+            for (int v = 0; v < v_head_dim; ++v) {
+                int r = h * v_head_dim + v;
+                const uint8_t* row_p = paged_get_row_packed_avx2(page_ptrs, num_pages, r);
+                if (!row_p) {
+                    out_h[v] = 0.0f;
+                    continue;
+                }
+
+                __m256 acc0 = _mm256_setzero_ps();
+                __m256 acc1 = _mm256_setzero_ps();
+                __m256 acc2 = _mm256_setzero_ps();
+                __m256 acc3 = _mm256_setzero_ps();
+
+                int k = 0;
+                for (; k + 32 <= kv_lora_rank; k += 32) {
+                    __m256i w_i8 = avx2_unpack_32_weights_fast(row_p + (k >> 2));
+                    __m128i lo16 = _mm256_castsi256_si128(w_i8);
+                    __m128i hi16 = _mm256_extracti128_si256(w_i8, 1);
+
+                    __m256 w0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo16));
+                    __m256 w1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(lo16, 8)));
+                    __m256 w2 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi16));
+                    __m256 w3 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(hi16, 8)));
+
+                    acc0 = _mm256_fmadd_ps(w0, _mm256_loadu_ps(lat_h + k), acc0);
+                    acc1 = _mm256_fmadd_ps(w1, _mm256_loadu_ps(lat_h + k + 8), acc1);
+                    acc2 = _mm256_fmadd_ps(w2, _mm256_loadu_ps(lat_h + k + 16), acc2);
+                    acc3 = _mm256_fmadd_ps(w3, _mm256_loadu_ps(lat_h + k + 24), acc3);
+                }
+
+                __m256 sum256 = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
+                float dot = hsum_ps_avx2(sum256);
+
+                // Cola escalar segura para dimensiones no divisibles entre 32
+                for (; k < kv_lora_rank; ++k) {
+                    uint8_t byte_val = row_p[k >> 2];
+                    int shift = (k & 3) * 2;
+                    int32_t w = ((int32_t)((byte_val >> shift) & 0x03)) - 1;
+                    dot += lat_h[k] * (float)w;
+                }
+                out_h[v] = dot * scale;
+            }
+        }
+    }
+}
+
+float trace_dot_f32_avx2(const float* a, const float* b, int n) {
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m256 va0 = _mm256_loadu_ps(a + i);
+        __m256 vb0 = _mm256_loadu_ps(b + i);
+        __m256 va1 = _mm256_loadu_ps(a + i + 8);
+        __m256 vb1 = _mm256_loadu_ps(b + i + 8);
+        acc0 = _mm256_fmadd_ps(va0, vb0, acc0);
+        acc1 = _mm256_fmadd_ps(va1, vb1, acc1);
+    }
+    for (; i + 8 <= n; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        acc0 = _mm256_fmadd_ps(va, vb, acc0);
+    }
+    float dot = hsum_ps_avx2(_mm256_add_ps(acc0, acc1));
+    for (; i < n; ++i) {
+        dot += a[i] * b[i];
+    }
+    return dot;
+}
+
+void trace_axpy_f32_avx2(float* y, float a, const float* x, int n) {
+    __m256 a_vec = _mm256_set1_ps(a);
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 vy = _mm256_loadu_ps(y + i);
+        __m256 vx = _mm256_loadu_ps(x + i);
+        _mm256_storeu_ps(y + i, _mm256_fmadd_ps(a_vec, vx, vy));
+    }
+    for (; i < n; ++i) {
+        y[i] += a * x[i];
+    }
+}
+
+#endif // TRACE_ENABLE_AVX2

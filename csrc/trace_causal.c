@@ -40,28 +40,13 @@ static void paged_linear_forward(
     int32_t* acc_int32 = ws ? ws->acc_int32 : (int32_t*)malloc(M * out_f * sizeof(int32_t));
     float* scale_x = ws ? ws->scale_x : (float*)malloc(M * sizeof(float));
 
-    __m256 pos127 = _mm256_set1_ps(127.0f);
-    __m256 neg127 = _mm256_set1_ps(-127.0f);
-
     #pragma omp parallel for num_threads(2) schedule(static) if (M >= 32)
     for (int64_t m = 0; m < M; ++m) {
         rms_norm(x + m * in_f, layer->sub_ln_w, x_norm + m * in_f, (int)in_f, eps);
 
         float amax = 0.0f;
-        __m256 max_vec = _mm256_setzero_ps();
         const float* xn_ptr = x_norm + m * in_f;
-        int64_t k = 0;
-        for (; k + 8 <= in_f; k += 8) {
-            __m256 v = _mm256_loadu_ps(xn_ptr + k);
-            __m256 abs_v = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), v);
-            max_vec = _mm256_max_ps(max_vec, abs_v);
-        }
-        float max_arr[8];
-        _mm256_storeu_ps(max_arr, max_vec);
-        for (int i = 0; i < 8; ++i) {
-            if (max_arr[i] > amax) amax = max_arr[i];
-        }
-        for (; k < in_f; ++k) {
+        for (int64_t k = 0; k < in_f; ++k) {
             float val = fabsf(xn_ptr[k]);
             if (val > amax) amax = val;
         }
@@ -69,19 +54,7 @@ static void paged_linear_forward(
         scale_x[m] = amax;
 
         float inv_s = q_max / amax;
-        __m256 inv_s_vec = _mm256_set1_ps(inv_s);
-        int64_t k_blk = 0;
-        for (; k_blk + 8 <= in_f; k_blk += 8) {
-            __m256 vx = _mm256_loadu_ps(xn_ptr + k_blk);
-            __m256 v_scaled = _mm256_mul_ps(vx, inv_s_vec);
-            __m256 v_rounded = _mm256_round_ps(v_scaled, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-            __m256 v_clamped = _mm256_min_ps(_mm256_max_ps(v_rounded, neg127), pos127);
-            __m256i vi32 = _mm256_cvtps_epi32(v_clamped);
-            __m128i vi16 = _mm_packs_epi32(_mm256_castsi256_si128(vi32), _mm256_extracti128_si256(vi32, 1));
-            __m128i vi8 = _mm_packs_epi16(vi16, vi16);
-            _mm_storel_epi64((__m128i*)(q_x + m * in_f + k_blk), vi8);
-        }
-        for (; k_blk < in_f; ++k_blk) {
+        for (int64_t k_blk = 0; k_blk < in_f; ++k_blk) {
             float v = nearbyintf(xn_ptr[k_blk] * inv_s);
             if (v > 127.0f) v = 127.0f;
             if (v < -127.0f) v = -127.0f;
@@ -101,14 +74,7 @@ static void paged_linear_forward(
 
     for (int64_t m = 0; m < M; ++m) {
         float factor = (scale_x[m] / q_max) * layer->scale;
-        __m256 factor_vec = _mm256_set1_ps(factor);
-        int64_t j = 0;
-        for (; j + 8 <= out_f; j += 8) {
-            __m256i acc_i = _mm256_loadu_si256((const __m256i*)(acc_int32 + m * out_f + j));
-            __m256 acc_f = _mm256_cvtepi32_ps(acc_i);
-            _mm256_storeu_ps(y + m * out_f + j, _mm256_mul_ps(acc_f, factor_vec));
-        }
-        for (; j < out_f; ++j) {
+        for (int64_t j = 0; j < out_f; ++j) {
             y[m * out_f + j] = (float)acc_int32[m * out_f + j] * factor;
         }
     }
@@ -253,12 +219,8 @@ static void run_gqa_attention(
                 float w = weights[j];
                 if (w > 0.0f) {
                     const float* v_row = v + j * 96 + kv_h * 48;
-                    __m256 vw = _mm256_set1_ps(w);
-                    for (int d = 0; d < 48; d += 8) {
-                        __m256 vv = _mm256_loadu_ps(v_row + d);
-                        __m256 vo = _mm256_loadu_ps(out_h + d);
-                        vo = _mm256_add_ps(vo, _mm256_mul_ps(vw, vv));
-                        _mm256_storeu_ps(out_h + d, vo);
+                    for (int d = 0; d < 48; ++d) {
+                        out_h[d] += w * v_row[d];
                     }
                 }
             }
@@ -285,15 +247,8 @@ static void run_moe_block(
 
     // Experto compartido sobre tokens no pad
     paged_linear_forward(&model->shared_up, z_norm_moe, ws->shared_up_buf, L, eps, ws);
-    __m256 zero_vec = _mm256_setzero_ps();
     int total_sh = L * 384;
-    int idx_sh = 0;
-    for (; idx_sh + 8 <= total_sh; idx_sh += 8) {
-        __m256 v = _mm256_loadu_ps(ws->shared_up_buf + idx_sh);
-        __m256 pos = _mm256_max_ps(v, zero_vec);
-        _mm256_storeu_ps(ws->shared_up_buf + idx_sh, _mm256_mul_ps(pos, pos));
-    }
-    for (; idx_sh < total_sh; ++idx_sh) {
+    for (int idx_sh = 0; idx_sh < total_sh; ++idx_sh) {
         float val = ws->shared_up_buf[idx_sh];
         ws->shared_up_buf[idx_sh] = (val > 0.0f) ? val * val : 0.0f;
     }
@@ -303,13 +258,7 @@ static void run_moe_block(
         if (token_ids[i] != model->cfg.pad_token_id) {
             float* moe_row = moe_out + i * D;
             const float* sh_row = ws->shared_down_buf + i * D;
-            int d = 0;
-            for (; d + 8 <= D; d += 8) {
-                __m256 vm = _mm256_loadu_ps(moe_row + d);
-                __m256 vs = _mm256_loadu_ps(sh_row + d);
-                _mm256_storeu_ps(moe_row + d, _mm256_add_ps(vm, vs));
-            }
-            for (; d < D; ++d) moe_row[d] += sh_row[d];
+            for (int d = 0; d < D; ++d) moe_row[d] += sh_row[d];
         }
     }
 
@@ -370,13 +319,7 @@ static void run_moe_block(
         if (count_e > 0) {
             paged_linear_forward(&model->exp_up[e], ws->exp_tokens_in, ws->exp_up_buf, count_e, eps, ws);
             int total_up = count_e * 384;
-            int idx_up = 0;
-            for (; idx_up + 8 <= total_up; idx_up += 8) {
-                __m256 v = _mm256_loadu_ps(ws->exp_up_buf + idx_up);
-                __m256 pos = _mm256_max_ps(v, zero_vec);
-                _mm256_storeu_ps(ws->exp_up_buf + idx_up, _mm256_mul_ps(pos, pos));
-            }
-            for (; idx_up < total_up; ++idx_up) {
+            for (int idx_up = 0; idx_up < total_up; ++idx_up) {
                 float val = ws->exp_up_buf[idx_up];
                 ws->exp_up_buf[idx_up] = (val > 0.0f) ? val * val : 0.0f;
             }
@@ -385,16 +328,9 @@ static void run_moe_block(
             for (int k = 0; k < count_e; ++k) {
                 int g_tok = ws->exp_tok_idx[k];
                 float gate = ws->exp_tok_gate[k];
-                __m256 vgate = _mm256_set1_ps(gate);
                 const float* down_row = ws->exp_down_buf + k * D;
                 float* moe_row = moe_out + g_tok * D;
-                int d = 0;
-                for (; d + 8 <= D; d += 8) {
-                    __m256 vm = _mm256_loadu_ps(moe_row + d);
-                    __m256 vd = _mm256_loadu_ps(down_row + d);
-                    _mm256_storeu_ps(moe_row + d, _mm256_add_ps(vm, _mm256_mul_ps(vd, vgate)));
-                }
-                for (; d < D; ++d) {
+                for (int d = 0; d < D; ++d) {
                     moe_row[d] += down_row[d] * gate;
                 }
             }
@@ -436,17 +372,7 @@ void trace_forward_backbone_lazy(
             const float* nz_row = ws->norm_z_buf + i * D;
             const float* ny_row = ws->norm_y_buf + i * D;
             const float* af_row = ws->anchor_feat + i * D;
-            int d = 0;
-            for (; d + 8 <= D; d += 8) {
-                __m256 v_nz = _mm256_loadu_ps(nz_row + d);
-                __m256 v_ny = _mm256_loadu_ps(ny_row + d);
-                __m256 v_af = _mm256_loadu_ps(af_row + d);
-                __m256 v_et = _mm256_loadu_ps(e_t + d);
-                __m256 v_er = _mm256_loadu_ps(e_r + d);
-                __m256 s = _mm256_add_ps(_mm256_add_ps(v_nz, v_ny), _mm256_add_ps(v_af, _mm256_add_ps(v_et, v_er)));
-                _mm256_storeu_ps(js_row + d, s);
-            }
-            for (; d < D; ++d) {
+            for (int d = 0; d < D; ++d) {
                 js_row[d] = nz_row[d] + ny_row[d] + af_row[d] + e_t[d] + e_r[d];
             }
         }
@@ -458,39 +384,25 @@ void trace_forward_backbone_lazy(
 
         int total_ld = L * D;
         float* z_mid = ws->z_mid;
-        __m256 valpha = _mm256_set1_ps(eff_alpha);
-        int idx_m = 0;
-        for (; idx_m + 8 <= total_ld; idx_m += 8) {
-            __m256 vz = _mm256_loadu_ps(ws->z_r + idx_m);
-            __m256 va = _mm256_loadu_ps(ws->attn_final + idx_m);
-            _mm256_storeu_ps(z_mid + idx_m, _mm256_add_ps(vz, _mm256_mul_ps(valpha, va)));
+        for (int idx_m = 0; idx_m < total_ld; ++idx_m) {
+            z_mid[idx_m] = ws->z_r[idx_m] + eff_alpha * ws->attn_final[idx_m];
         }
-        for (; idx_m < total_ld; ++idx_m) z_mid[idx_m] = ws->z_r[idx_m] + eff_alpha * ws->attn_final[idx_m];
 
         run_moe_block(model, token_ids, ws, L, eps);
 
         float* z_next = ws->z_next;
-        __m256 valpha_moe = _mm256_set1_ps(eff_alpha);
-        int idx_z = 0;
-        for (; idx_z + 8 <= total_ld; idx_z += 8) {
-            __m256 vz = _mm256_loadu_ps(z_mid + idx_z);
-            __m256 vm = _mm256_loadu_ps(ws->moe_out + idx_z);
-            _mm256_storeu_ps(z_next + idx_z, _mm256_add_ps(vz, _mm256_mul_ps(valpha_moe, vm)));
+        for (int idx_z = 0; idx_z < total_ld; ++idx_z) {
+            z_next[idx_z] = z_mid[idx_z] + eff_alpha * ws->moe_out[idx_z];
         }
-        for (; idx_z < total_ld; ++idx_z) z_next[idx_z] = z_mid[idx_z] + eff_alpha * ws->moe_out[idx_z];
 
         float* fusion = ws->fusion;
         for (int i = 0; i < L; ++i) {
             float* f_row = fusion + i * D;
             const float* y_row = ws->y_r + i * D;
             const float* zn_row = z_next + i * D;
-            int d = 0;
-            for (; d + 8 <= D; d += 8) {
-                __m256 vy = _mm256_loadu_ps(y_row + d);
-                __m256 vz = _mm256_loadu_ps(zn_row + d);
-                _mm256_storeu_ps(f_row + d, _mm256_add_ps(vy, vz));
+            for (int d = 0; d < D; ++d) {
+                f_row[d] = y_row[d] + zn_row[d];
             }
-            for (; d < D; ++d) f_row[d] = y_row[d] + zn_row[d];
             rms_norm(f_row, model->norm_refine, f_row, D, eps);
         }
 

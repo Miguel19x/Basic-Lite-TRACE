@@ -81,6 +81,14 @@ def load_libtrace_lm():
     lib.trace_lm_kv_get_last_common_prefix.argtypes = [ctypes.c_void_p]
     lib.trace_lm_kv_get_last_common_prefix.restype = ctypes.c_int
 
+    if hasattr(lib, "trace_cpu_active_isa"):
+        lib.trace_cpu_active_isa.argtypes = []
+        lib.trace_cpu_active_isa.restype = ctypes.c_char_p
+
+    if hasattr(lib, "trace_cpu_set_isa"):
+        lib.trace_cpu_set_isa.argtypes = [ctypes.c_char_p]
+        lib.trace_cpu_set_isa.restype = None
+
     return lib
 
 
@@ -286,11 +294,12 @@ def test_prefix_caching_and_ttft():
 
 def test_cli_smoke():
     assert os.path.exists(BIN_PATH), f"No se encontró binario {BIN_PATH}"
-    # Ejecutar ./trace_lm --help o sin argumentos
-    res = subprocess.run([BIN_PATH, "--max_tokens", "4"], capture_output=True, text=True)
-    # Debe imprimir el banner de inicio
-    assert "Basic-Lite TRACE" in res.stdout or "Error" in res.stderr
-    print("✓ Smoke test del ejecutable ./trace_lm superado.")
+    # Ejecutar ./trace_lm con prompt bilingüe de prueba
+    res = subprocess.run([BIN_PATH, "--prompt", "Había una vez en un bosque digital", "--max_tokens", "4"], capture_output=True, text=True)
+    # Debe imprimir el banner de inicio con ISA activa
+    assert "Basic-Lite TRACE Language Model CLI" in res.stdout or "Error" in res.stderr
+    assert "ISA CPU activa:" in res.stdout or "Error" in res.stderr
+    print("✓ Smoke test del ejecutable ./trace_lm superado (detección de ISA y banner bilingüe).")
 
 
 if __name__ == "__main__":

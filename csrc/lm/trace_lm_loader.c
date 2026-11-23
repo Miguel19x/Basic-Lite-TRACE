@@ -12,6 +12,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
 #include <math.h>
 
 static const char* scan_json_key(const char* start, const char* end, const char* key) {
@@ -72,9 +73,22 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
     if (!model) return NULL;
     model->fd = -1;
 
-    // 1. Intentar O_DIRECT
-    int fd = open(bin_path, O_RDONLY | O_DIRECT);
-    int used_odirect = 1;
+    // 1. Intentar O_DIRECT portable (o F_NOCACHE en Darwin)
+    int open_flags = O_RDONLY;
+#ifdef O_DIRECT
+    open_flags |= O_DIRECT;
+#endif
+    int fd = open(bin_path, open_flags);
+    int used_odirect = 0;
+#ifdef O_DIRECT
+    if (fd >= 0) used_odirect = 1;
+#endif
+#ifdef F_NOCACHE
+    if (fd >= 0) {
+        fcntl(fd, F_NOCACHE, 1);
+        used_odirect = 1;
+    }
+#endif
     if (fd < 0) {
         fd = open(bin_path, O_RDONLY);
         used_odirect = 0;
@@ -96,6 +110,21 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
     }
 
     ssize_t r = pread(fd, scratch, 4096, 0);
+    if (r < 0 && errno == EINVAL && used_odirect) {
+        close(fd);
+        fd = open(bin_path, O_RDONLY);
+        if (fd < 0) {
+            free(scratch);
+            trace_lm_free(model);
+            return NULL;
+        }
+        used_odirect = 0;
+        if (model) {
+            model->fd = fd;
+            model->used_odirect = 0;
+        }
+        r = pread(fd, scratch, 4096, 0);
+    }
     model->pread_calls++;
     if (r < 64 || memcmp(scratch, "PBITCOS1", 8) != 0) {
         free(scratch);

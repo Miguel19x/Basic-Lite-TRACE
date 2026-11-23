@@ -8,6 +8,7 @@
 #include "trace_lm.h"
 #include "trace_lm_kv.h"
 #include "trace_tokenizer.h"
+#include "paged_dispatch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +43,7 @@ int main(int argc, char** argv) {
 
     printf("================================================================================\n");
     printf("Basic-Lite TRACE — Motor Nativo C Standalone (TRACELanguageModel)\n");
+    printf("Motor ISA:  %s (Despacho Dinamico Universal)\n", trace_cpu_active_isa());
     printf("Modelo:     %s\n", model_path);
     printf("Tokenizador:%s\n", tokenizer_path);
     printf("Prompt:     \"%s\"\n", prompt);

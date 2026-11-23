@@ -38,16 +38,12 @@ def compile_and_load_ternary_kernel() -> ctypes.CDLL | None:
         except Exception:
             pass
 
-    c_path = curr_dir.parent.parent / "csrc" / "paged_gemm.c"
+    proj_dir = curr_dir.parent.parent
     so_path = curr_dir / "libternary.so"
 
     try:
-        if not so_path.exists() or (c_path.exists() and c_path.stat().st_mtime > so_path.stat().st_mtime):
-            cmd = [
-                "gcc", "-O3", "-mavx2", "-mfma", "-ffp-contract=off", "-fopenmp",
-                "-Wall", "-Wextra", "-shared", "-fPIC",
-                str(c_path), "-o", str(so_path)
-            ]
+        if not so_path.exists():
+            cmd = ["make", "-C", str(proj_dir), "trace/ops/libternary.so"]
             res = subprocess.run(cmd, capture_output=True, text=True)
             if res.returncode != 0:
                 print(f"[Aviso] No se pudo compilar libternary.so: {res.stderr}", file=sys.stderr)

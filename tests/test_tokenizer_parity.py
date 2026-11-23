@@ -186,7 +186,52 @@ def test_python_and_c_parity_and_roundtrip():
         print("✓ Paridad bit a bit 100% Py vs C en encode/decode, round-trip, casos borde y especiales superados.")
 
 
+def test_bilingual_large_vocab_roundtrip():
+    c_lib = load_c_tokenizer_lib()
+    bilingual_corpus = [
+        "El gato está durmiendo plácidamente sobre el teclado en la oficina.",
+        "The quick brown fox jumps over the lazy sleeping dog in the forest.",
+        "La optimización de hiperparámetros aceleró la convergencia del modelo.",
+        "BitNet W1.58 quantization reduces linear projections to ternary addition and subtraction.",
+        "La memoria paginada de 4096 bytes garantiza lecturas directas del subsistema NVMe.",
+        "Natural language processing bridges human concepts with algorithmic representations.",
+        "Validación exhaustiva de paridad bilingüe en inglés y español para el Hito 3.6b.",
+    ]
+    tok = TRACETokenizer.train(bilingual_corpus, target_vocab_size=512, min_freq=1)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bin_path = os.path.join(tmpdir, "tok_bilingual.bin")
+        tok.save(bin_path)
+
+        tok_loaded = TRACETokenizer(bin_path)
+        assert tok_loaded.vocab_size == len(tok.pieces)
+
+        model_sz = c_lib.trace_tokenizer_sizeof()
+        c_buf = ctypes.create_string_buffer(model_sz)
+        ret = c_lib.trace_tokenizer_load(c_buf, bin_path.encode("utf-8"))
+        assert ret == 0, f"Error cargando tokenizador bilingüe en C: {ret}"
+
+        out_c_buf = (ctypes.c_int32 * 2048)()
+        out_text_buf = ctypes.create_string_buffer(8192)
+
+        for text in bilingual_corpus:
+            raw_b = text.encode("utf-8")
+            py_toks = tok_loaded.encode(text)
+            c_cnt = c_lib.trace_tokenizer_encode(c_buf, raw_b, len(raw_b), out_c_buf, 2048)
+            c_toks = [out_c_buf[i] for i in range(c_cnt)]
+            assert py_toks == c_toks, f"Fallo paridad bilingüe: {text}"
+            py_dec = tok_loaded.decode(py_toks)
+            assert py_dec == text, f"Fallo decode bilingüe Py: {text}"
+
+            c_dec_len = c_lib.trace_tokenizer_decode(c_buf, out_c_buf, c_cnt, out_text_buf, 8192)
+            assert c_dec_len == len(raw_b)
+            assert out_text_buf.raw[:c_dec_len].decode("utf-8") == text
+
+        c_lib.trace_tokenizer_free(c_buf)
+        print("✓ Paridad bilingüe de vocabulario ampliado superada exitosamente.")
+
+
 if __name__ == "__main__":
     test_digit_isolation_and_space_prefix()
     test_python_and_c_parity_and_roundtrip()
+    test_bilingual_large_vocab_roundtrip()
     print("✓ Todas las pruebas de paridad del tokenizador pasaron exitosamente.")

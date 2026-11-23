@@ -18,28 +18,13 @@ def get_paged_c_lib() -> ctypes.CDLL:
         return _LIB_PAGED_INSTANCE
 
     curr_dir = Path(__file__).resolve().parent.parent.parent
-    c_path = curr_dir / "csrc" / "paged_gemm.c"
     so_path = curr_dir / "libpaged_gemm.so"
 
-    if not so_path.exists() or (c_path.exists() and c_path.stat().st_mtime > so_path.stat().st_mtime):
-        cmd = [
-            "gcc",
-            "-O3",
-            "-mavx2",
-            "-mfma",
-            "-ffp-contract=off",
-            "-fopenmp",
-            "-Wall",
-            "-Wextra",
-            "-shared",
-            "-fPIC",
-            str(c_path),
-            "-o",
-            str(so_path),
-        ]
+    if not so_path.exists():
+        cmd = ["make", "-C", str(curr_dir), "libpaged_gemm.so"]
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode != 0:
-            raise RuntimeError(f"Error compilando paged_gemm_kernel.c:\n{res.stderr}")
+            raise RuntimeError(f"Error compilando libpaged_gemm.so:\n{res.stderr}")
 
     lib = ctypes.CDLL(str(so_path))
     lib.paged_direct_matmul_fast_c.argtypes = [

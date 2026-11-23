@@ -199,7 +199,7 @@ def main() -> None:
     parser.add_argument("--log-file", type=str, default="results/train_lm.jsonl", help="Archivo de logs JSONL")
 
     # Arquitectura y QAT
-    parser.add_argument("--preset", type=str, default="25m", choices=["dev", "25m"], help="Preset TRACELMConfig")
+    parser.add_argument("--preset", type=str, default="25m", choices=["dev", "25m", "25m-bi", "45m-bi"], help="Preset TRACELMConfig")
     parser.add_argument("--weight-scale", type=str, default="mean", choices=["mean", "median"], help="Escala W1.58")
     parser.add_argument("--max-seq-len", type=int, default=None, help="Largo máximo de contexto")
     parser.add_argument("--fp16-warmup-ratio", type=float, default=0.0, help="Fracción Continual QAT 16b->1.58b")
@@ -250,7 +250,14 @@ def main() -> None:
         raw_cfg = ckpt["cfg"]
         cfg = TRACELMConfig(**raw_cfg) if isinstance(raw_cfg, dict) else raw_cfg
     else:
-        cfg = TRACELMConfig.preset_25m() if args.preset == "25m" else TRACELMConfig()
+        if args.preset == "25m":
+            cfg = TRACELMConfig.preset_25m()
+        elif args.preset == "25m-bi":
+            cfg = TRACELMConfig.preset_25m_bilingual()
+        elif args.preset == "45m-bi":
+            cfg = TRACELMConfig.preset_45m_bilingual()
+        else:
+            cfg = TRACELMConfig()
         if args.max_seq_len is not None:
             cfg.max_seq_len = args.max_seq_len
         cfg.weight_scale_type = args.weight_scale

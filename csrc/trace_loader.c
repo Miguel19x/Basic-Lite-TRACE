@@ -12,6 +12,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
 #include <math.h>
 
 typedef struct {
@@ -142,8 +143,21 @@ int trace_model_load_odirect(const char* bin_path, TraceModel* model) {
     memset(model, 0, sizeof(TraceModel));
     model->fd = -1; // Inicialización estricta tras memset
 
-    int fd = open(bin_path, O_RDONLY | O_DIRECT);
-    int used_odirect = 1;
+    int open_flags = O_RDONLY;
+#ifdef O_DIRECT
+    open_flags |= O_DIRECT;
+#endif
+    int fd = open(bin_path, open_flags);
+    int used_odirect = 0;
+#ifdef O_DIRECT
+    if (fd >= 0) used_odirect = 1;
+#endif
+#ifdef F_NOCACHE
+    if (fd >= 0) {
+        fcntl(fd, F_NOCACHE, 1);
+        used_odirect = 1;
+    }
+#endif
     if (fd < 0) {
         fd = open(bin_path, O_RDONLY);
         used_odirect = 0;
@@ -162,6 +176,19 @@ int trace_model_load_odirect(const char* bin_path, TraceModel* model) {
     }
 
     ssize_t r = pread(fd, scratch, 4096, 0);
+    if (r < 0 && errno == EINVAL && used_odirect) {
+        close(fd);
+        fd = open(bin_path, O_RDONLY);
+        if (fd < 0) {
+            free(scratch);
+            model->fd = -1;
+            return -1;
+        }
+        used_odirect = 0;
+        model->fd = fd;
+        model->used_odirect = 0;
+        r = pread(fd, scratch, 4096, 0);
+    }
     model->pread_calls++;
     if (r < 64 || memcmp(scratch, "PBITCOS1", 8) != 0) {
         free(scratch);

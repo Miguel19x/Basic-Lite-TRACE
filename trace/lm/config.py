@@ -59,3 +59,45 @@ class TRACELMConfig:
             quantize_weights_enabled=True,
             weight_scale_type="mean",
         )
+
+    @classmethod
+    def preset_25m_bilingual(cls) -> "TRACELMConfig":
+        """Preset bilingüe (EN + ES) de 25M parámetros con vocabulario BPE extendido (8192)."""
+        return cls(
+            vocab_size=8192,
+            max_seq_len=4096,
+            d_model=512,
+            n_layers=12,
+            n_heads=8,
+            d_ff=1024,
+            kv_lora_rank=128,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=32,
+            v_head_dim=64,
+            eps=1e-6,
+            use_add_sub_inference=False,
+            tie_word_embeddings=True,
+            quantize_weights_enabled=True,
+            weight_scale_type="mean",
+        )
+
+    @classmethod
+    def preset_45m_bilingual(cls) -> "TRACELMConfig":
+        """Preset bilingüe profundo de 45M parámetros (EN + ES) con preservación total de capacidad."""
+        return cls(
+            vocab_size=8192,
+            max_seq_len=4096,
+            d_model=640,
+            n_layers=14,
+            n_heads=10,
+            d_ff=1280,
+            kv_lora_rank=160,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=32,
+            v_head_dim=64,
+            eps=1e-6,
+            use_add_sub_inference=False,
+            tie_word_embeddings=True,
+            quantize_weights_enabled=True,
+            weight_scale_type="mean",
+        )
