@@ -19,6 +19,9 @@ trace_lm
 *.pt
 *.bin
 *.zip
+*.jsonl
+checkpoints/
+checkpoints/*
 output/
 context_archive.db
 *.db-journal

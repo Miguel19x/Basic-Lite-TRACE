@@ -281,7 +281,12 @@ def main() -> None:
 
     use_amp = (not args.no_amp) and device_type in ("cuda", "xpu")
     if device_type == "cuda":
-        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        is_bf16_native = (
+            torch.cuda.is_available()
+            and torch.cuda.get_device_capability()[0] >= 8
+            and torch.cuda.is_bf16_supported()
+        )
+        amp_dtype = torch.bfloat16 if is_bf16_native else torch.float16
     elif device_type == "xpu":
         amp_dtype = torch.bfloat16
     else:

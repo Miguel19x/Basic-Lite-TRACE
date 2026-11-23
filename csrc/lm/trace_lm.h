@@ -119,7 +119,14 @@ int trace_lm_forward(
     TraceLMWorkspace* ws
 );
 
-// Muestreo
+// Muestreo y penalizacion
+void trace_lm_apply_repetition_penalty(
+    float* logits,
+    int vocab_size,
+    const int* tokens,
+    int num_tokens,
+    float penalty
+);
 int trace_lm_sample_greedy(const float* logits, int vocab_size);
 int trace_lm_sample(
     const float* logits,

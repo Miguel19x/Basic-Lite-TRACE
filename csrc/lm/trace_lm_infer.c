@@ -366,6 +366,35 @@ int trace_lm_forward(
     return S;
 }
 
+void trace_lm_apply_repetition_penalty(
+    float* logits,
+    int vocab_size,
+    const int* tokens,
+    int num_tokens,
+    float penalty
+) {
+    if (!logits || vocab_size <= 0 || !tokens || num_tokens <= 0 || penalty <= 1.0f) {
+        return;
+    }
+
+    uint8_t* seen = (uint8_t*)calloc((size_t)vocab_size, sizeof(uint8_t));
+    if (!seen) return;
+
+    for (int i = 0; i < num_tokens; ++i) {
+        int tok = tokens[i];
+        if (tok >= 0 && tok < vocab_size && !seen[tok]) {
+            seen[tok] = 1;
+            if (logits[tok] > 0.0f) {
+                logits[tok] /= penalty;
+            } else {
+                logits[tok] *= penalty;
+            }
+        }
+    }
+
+    free(seen);
+}
+
 int trace_lm_sample_greedy(const float* logits, int vocab_size) {
     if (!logits || vocab_size <= 0) return 0;
     int best_tok = 0;
@@ -379,8 +408,22 @@ int trace_lm_sample_greedy(const float* logits, int vocab_size) {
     return best_tok;
 }
 
+typedef struct {
+    int id;
+    float prob;
+} TraceTokenProb;
+
+static int compare_token_probs(const void* a, const void* b) {
+    float pa = ((const TraceTokenProb*)a)->prob;
+    float pb = ((const TraceTokenProb*)b)->prob;
+    if (pb > pa) return 1;
+    if (pb < pa) return -1;
+    return 0;
+}
+
 static inline uint64_t xorshift64(uint64_t* state) {
     uint64_t x = *state;
+    if (x == 0) x = 0x853c49e6748fea9bULL;
     x ^= x << 13;
     x ^= x >> 7;
     x ^= x << 17;
@@ -389,7 +432,8 @@ static inline uint64_t xorshift64(uint64_t* state) {
 
 static inline float rand_uniform(uint64_t* rng_state) {
     if (!rng_state) return 0.5f;
-    return (float)(xorshift64(rng_state) >> 11) * (1.0f / 9007199254740992.0f);
+    uint64_t r = xorshift64(rng_state);
+    return (float)((double)(r >> 11) * (1.0 / 9007199254740992.0));
 }
 
 int trace_lm_sample(
@@ -404,72 +448,71 @@ int trace_lm_sample(
         return trace_lm_sample_greedy(logits, vocab_size);
     }
 
-    float* probs = (float*)malloc(sizeof(float) * vocab_size);
-    if (!probs) return trace_lm_sample_greedy(logits, vocab_size);
+    TraceTokenProb* items = (TraceTokenProb*)malloc(sizeof(TraceTokenProb) * vocab_size);
+    if (!items) return trace_lm_sample_greedy(logits, vocab_size);
 
     float max_sc = -1e30f;
     for (int v = 0; v < vocab_size; ++v) {
         float scaled = logits[v] / temperature;
-        probs[v] = scaled;
         if (scaled > max_sc) max_sc = scaled;
+        items[v].id = v;
+        items[v].prob = scaled;
     }
 
     float sum_exp = 0.0f;
     for (int v = 0; v < vocab_size; ++v) {
-        float p = expf(probs[v] - max_sc);
-        probs[v] = p;
+        float p = expf(items[v].prob - max_sc);
+        items[v].prob = p;
         sum_exp += p;
     }
     float sum_inv = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
     for (int v = 0; v < vocab_size; ++v) {
-        probs[v] *= sum_inv;
+        items[v].prob *= sum_inv;
     }
+
+    // Ordenar de mayor a menor probabilidad para top_k y top_p
+    qsort(items, (size_t)vocab_size, sizeof(TraceTokenProb), compare_token_probs);
+
+    int n_candidates = vocab_size;
 
     // Top-k filtering si top_k > 0
-    if (top_k > 0 && top_k < vocab_size) {
-        float threshold = 0.0f;
-        // Seleccion rapida de umbral
-        float* tmp = (float*)malloc(sizeof(float) * vocab_size);
-        if (tmp) {
-            memcpy(tmp, probs, sizeof(float) * vocab_size);
-            for (int i = 0; i < top_k; ++i) {
-                int max_idx = i;
-                for (int j = i + 1; j < vocab_size; ++j) {
-                    if (tmp[j] > tmp[max_idx]) max_idx = j;
-                }
-                float t_val = tmp[i];
-                tmp[i] = tmp[max_idx];
-                tmp[max_idx] = t_val;
-            }
-            threshold = tmp[top_k - 1];
-            free(tmp);
-        }
-
-        sum_exp = 0.0f;
-        for (int v = 0; v < vocab_size; ++v) {
-            if (probs[v] < threshold) probs[v] = 0.0f;
-            else sum_exp += probs[v];
-        }
-        sum_inv = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
-        for (int v = 0; v < vocab_size; ++v) probs[v] *= sum_inv;
+    if (top_k > 0 && top_k < n_candidates) {
+        n_candidates = top_k;
     }
 
-    // Top-p (nucleus) filtering si top_p < 1.0
+    // Top-p (nucleus) filtering si top_p > 0.0f y top_p < 1.0f
     if (top_p > 0.0f && top_p < 1.0f) {
-        // Enfoque greedy acumulativo
+        float cum = 0.0f;
+        int cutoff = 1;
+        for (int i = 0; i < n_candidates; ++i) {
+            cum += items[i].prob;
+            cutoff = i + 1;
+            if (cum >= top_p) {
+                break;
+            }
+        }
+        n_candidates = cutoff;
     }
 
+    // Renormalizar los candidatos seleccionados
+    float cum_sum = 0.0f;
+    for (int i = 0; i < n_candidates; ++i) {
+        cum_sum += items[i].prob;
+    }
+    float renorm = (cum_sum > 0.0f) ? (1.0f / cum_sum) : 1.0f;
+
+    // Muestreo uniforme en [0, 1)
     float coin = rand_uniform(rng_state);
     float cum = 0.0f;
-    int sampled_tok = vocab_size - 1;
-    for (int v = 0; v < vocab_size; ++v) {
-        cum += probs[v];
+    int sampled_tok = items[0].id;
+    for (int i = 0; i < n_candidates; ++i) {
+        cum += items[i].prob * renorm;
         if (coin <= cum) {
-            sampled_tok = v;
+            sampled_tok = items[i].id;
             break;
         }
     }
 
-    free(probs);
+    free(items);
     return sampled_tok;
 }
