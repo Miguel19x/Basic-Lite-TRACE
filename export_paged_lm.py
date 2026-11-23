@@ -61,16 +61,23 @@ def export_lm_checkpoint(
             raise FileNotFoundError(f"Checkpoint no encontrado: {checkpoint_path}")
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         if "cfg" in ckpt:
-            cfg = ckpt["cfg"]
+            cfg = TRACELMConfig(**ckpt["cfg"]) if isinstance(ckpt["cfg"], dict) else ckpt["cfg"]
         else:
             cfg = TRACELMConfig.preset_25m() if preset == "25m" else TRACELMConfig()
+        cfg.quantize_weights_enabled = True
         model = TRACELanguageModel(cfg)
-        state_dict = ckpt["model_state"] if "model_state" in ckpt else ckpt
+        if "model_state" in ckpt:
+            state_dict = ckpt["model_state"]
+        elif "model_state_dict" in ckpt:
+            state_dict = ckpt["model_state_dict"]
+        else:
+            state_dict = ckpt
         missing, unexpected = model.load_state_dict(state_dict, strict=True)
         assert len(missing) == 0 and len(unexpected) == 0, f"Discrepancia state_dict: {missing=}, {unexpected=}"
         print(f"Pesos cargados exitosamente desde {checkpoint_path}")
     else:
         cfg = TRACELMConfig.preset_25m() if preset == "25m" else TRACELMConfig()
+        cfg.quantize_weights_enabled = True
         model = TRACELanguageModel(cfg)
 
     model.eval()

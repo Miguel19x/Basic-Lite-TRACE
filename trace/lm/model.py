@@ -4,8 +4,9 @@
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 
 """
-TRACELanguageModel: Modelo de Lenguaje Autorregresivo de Ultra-Baja Precisión
-Combina MLA 100% Ternaria, FFN denso ternario (Squared-ReLU) y tied embeddings.
+TRACELanguageModel: Modelo de Lenguaje Autorregresivo de Ultra-Baja Precisión.
+Combina MLA 100% Ternaria, FFN denso ternario (Squared-ReLU), tied embeddings,
+soporte Continual QAT y gradient checkpointing opcional.
 """
 
 from trace.layers.bitlinear import BitLinear
@@ -17,6 +18,7 @@ from trace.lm.mla import MultiHeadLatentAttention
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as ckpt_utils
 
 
 class TRACELMBlock(nn.Module):
@@ -62,6 +64,7 @@ class TRACELanguageModel(nn.Module):
             self.lm_head.weight = self.tok_emb.weight
 
         self.apply(self._init_weights)
+        self._apply_quant_config()
 
     def _init_weights(self, module: nn.Module) -> None:
         if isinstance(module, (nn.Linear, nn.Embedding)):
@@ -69,7 +72,28 @@ class TRACELanguageModel(nn.Module):
             if hasattr(module, "bias") and module.bias is not None:
                 nn.init.zeros_(module.bias)
 
-    def build_causal_mask(self, seq_len: int, total_len: int, device: torch.device) -> torch.Tensor | None:
+    def _apply_quant_config(self) -> None:
+        """Propaga weight_scale_type y quantize_weights_enabled a todos los BitLinear (MLA + FFN)."""
+        for m in self.modules():
+            if isinstance(m, BitLinear):
+                m.quantize_weights_enabled = self.cfg.quantize_weights_enabled
+                m.weight_scale_type = self.cfg.weight_scale_type
+
+    def set_quantize_weights(self, enabled: bool) -> None:
+        """Activa o desactiva la cuantización ternaria W1.58 (soporte Continual QAT)."""
+        self.cfg.quantize_weights_enabled = enabled
+        for m in self.modules():
+            if isinstance(m, BitLinear):
+                m.quantize_weights_enabled = enabled
+                if m.cached_w_eff.numel() > 0:
+                    m.cached_w_eff = torch.empty(0, device=m.weight.device)
+
+    def build_causal_mask(
+        self,
+        seq_len: int,
+        total_len: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
         """Máscara causal compatible con Prefix Caching (past_len > 0 y seq_len >= 1)."""
         if seq_len == 1 and total_len == 1:
             return None
@@ -79,36 +103,38 @@ class TRACELanguageModel(nn.Module):
             causal_block = torch.full((seq_len, seq_len), float("-inf"), device=device)
             causal_block = torch.triu(causal_block, diagonal=1)
             mask[:, past_len:] = causal_block
-        return mask.unsqueeze(0).unsqueeze(0) # [1, 1, seq_len, total_len]
+        return mask.unsqueeze(0).unsqueeze(0)
 
     def configure_adamw_groups(
         self,
         bitlinear_weight_decay: float = 0.0,
-        weight_decay: float = 0.01
-    ) -> list:
+        weight_decay: float = 0.01,
+    ) -> list[dict]:
         """Configuración de 3 grupos desacoplados de AdamW (estilo BitNet b1.58)."""
-        bitlinear_param_ids = {id(mod.weight) for mod in self.modules() if isinstance(mod, BitLinear)}
+        bitlinear_ids = {id(mod.weight) for mod in self.modules() if isinstance(mod, BitLinear)}
 
         bitlinear_params = []
-        dense_decay_params = []
+        decay_params = []
         no_decay_params = []
 
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
-            if id(param) in bitlinear_param_ids:
+            if id(param) in bitlinear_ids:
                 bitlinear_params.append(param)
             elif "emb" in name or param.dim() < 2:
-                # Embeddings léxicos y biases/escalas 1D no decaen
                 no_decay_params.append(param)
             else:
-                dense_decay_params.append(param)
+                decay_params.append(param)
 
-        return [
-            {"name": "bitlinear_shadow", "params": bitlinear_params, "weight_decay": bitlinear_weight_decay},
-            {"name": "dense_decay", "params": dense_decay_params, "weight_decay": weight_decay},
-            {"name": "no_decay", "params": no_decay_params, "weight_decay": 0.0},
-        ]
+        groups = []
+        if bitlinear_params:
+            groups.append({"name": "bitlinear_shadow", "params": bitlinear_params, "weight_decay": bitlinear_weight_decay})
+        if decay_params:
+            groups.append({"name": "dense_decay", "params": decay_params, "weight_decay": weight_decay})
+        if no_decay_params:
+            groups.append({"name": "no_decay", "params": no_decay_params, "weight_decay": 0.0})
+        return groups
 
     def forward(
         self,
@@ -118,27 +144,49 @@ class TRACELanguageModel(nn.Module):
         use_weight_absorption: bool = False,
         quantize_kv_int8: bool = False,
         add_sub_mode: bool | None = None,
+        use_grad_checkpoint: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, list]:
-        B, S = input_ids.shape
+        _, S = input_ids.shape
         past_len = kv_caches[0][0].shape[1] if kv_caches is not None else 0
         total_len = past_len + S
         add_sub = self.cfg.use_add_sub_inference if add_sub_mode is None else add_sub_mode
 
         x = self.tok_emb(input_ids)
-        attn_mask = self.build_causal_mask(S, total_len, x.device)
+
+        # Sin caché y sin absorción -> attn_mask=None habilita SDPA is_causal=True (FlashAttention-2)
+        if kv_caches is None and not use_weight_absorption:
+            attn_mask = None
+        else:
+            attn_mask = self.build_causal_mask(S, total_len, x.device)
 
         new_caches = []
         for idx, layer in enumerate(self.layers):
             c_in = kv_caches[idx] if kv_caches is not None else None
-            x, c_out = layer(
-                x,
-                attn_mask=attn_mask,
-                kv_cache=c_in,
-                use_weight_absorption=use_weight_absorption,
-                quantize_kv_int8=quantize_kv_int8,
-                add_sub_mode=add_sub,
-            )
-            new_caches.append(c_out)
+            if self.training and use_grad_checkpoint and kv_caches is None:
+
+                def _ckpt_fn(inp: torch.Tensor, _layer: TRACELMBlock = layer) -> torch.Tensor:
+                    out, _ = _layer(
+                        inp,
+                        attn_mask=attn_mask,
+                        kv_cache=None,
+                        use_weight_absorption=use_weight_absorption,
+                        quantize_kv_int8=quantize_kv_int8,
+                        add_sub_mode=add_sub,
+                    )
+                    return out
+
+                x = ckpt_utils.checkpoint(_ckpt_fn, x, use_reentrant=False)
+                new_caches.append(None)
+            else:
+                x, c_out = layer(
+                    x,
+                    attn_mask=attn_mask,
+                    kv_cache=c_in,
+                    use_weight_absorption=use_weight_absorption,
+                    quantize_kv_int8=quantize_kv_int8,
+                    add_sub_mode=add_sub,
+                )
+                new_caches.append(c_out)
 
         x = self.final_norm(x)
         logits = self.lm_head(x)
@@ -146,7 +194,7 @@ class TRACELanguageModel(nn.Module):
         loss = None
         if targets is not None:
             loss = F.cross_entropy(
-                logits.view(-1, self.cfg.vocab_size),
+                logits.float().view(-1, self.cfg.vocab_size),
                 targets.view(-1),
                 ignore_index=self.cfg.pad_token_id,
             )
@@ -154,15 +202,14 @@ class TRACELanguageModel(nn.Module):
         return logits, loss, new_caches
 
     @staticmethod
-    def _sample_next_token(logits: torch.Tensor, temperature: float = 1.0, top_k: int = 50) -> torch.Tensor:
-        """Helper para muestreo o selección greedy determinista."""
-        if temperature <= 0.0:
+    def _sample_next_token(logits: torch.Tensor, temperature: float, top_k: int) -> torch.Tensor:
+        if temperature == 0.0:
             return torch.argmax(logits, dim=-1, keepdim=True)
-        scaled_logits = logits / max(temperature, 1e-5)
+        scaled = logits / max(temperature, 1e-5)
         if top_k > 0:
-            v, _ = torch.topk(scaled_logits, min(top_k, scaled_logits.shape[-1]))
-            scaled_logits[scaled_logits < v[:, [-1]]] = float("-inf")
-        probs = F.softmax(scaled_logits, dim=-1)
+            v, _ = torch.topk(scaled, min(top_k, scaled.shape[-1]))
+            scaled = scaled.masked_fill(scaled < v[:, [-1]], float("-inf"))
+        probs = F.softmax(scaled, dim=-1)
         return torch.multinomial(probs, num_samples=1)
 
     @torch.no_grad()
@@ -175,42 +222,34 @@ class TRACELanguageModel(nn.Module):
         eos_token_id: int | None = None,
         quantize_kv_int8: bool = False,
     ) -> torch.Tensor:
-        """Generación con prefill único y decodificación incremental token a token con kv_caches y absorción."""
         self.eval()
-        if max_new_tokens <= 0:
-            return input_ids
-
-        eos_id = eos_token_id if eos_token_id is not None else self.cfg.eos_token_id
         curr_ids = input_ids.clone()
-        if curr_ids.shape[1] >= self.cfg.max_seq_len:
+        if max_new_tokens <= 0 or curr_ids.shape[1] >= self.cfg.max_seq_len:
             return curr_ids
 
-        # 1. Prefill único
+        eos_id = eos_token_id if eos_token_id is not None else self.cfg.eos_token_id
+
         logits, _, kv_caches = self(
             curr_ids,
             use_weight_absorption=True,
-            quantize_kv_int8=quantize_kv_int8
+            quantize_kv_int8=quantize_kv_int8,
         )
         next_token = self._sample_next_token(logits[:, -1, :], temperature, top_k)
         curr_ids = torch.cat([curr_ids, next_token], dim=1)
-
         if (next_token == eos_id).all():
             return curr_ids
 
-        # 2. Decodificación incremental token a token (S = 1) con absorción de pesos
         for _ in range(max_new_tokens - 1):
             if curr_ids.shape[1] >= self.cfg.max_seq_len:
                 break
-
             logits, _, kv_caches = self(
                 next_token,
                 kv_caches=kv_caches,
                 use_weight_absorption=True,
-                quantize_kv_int8=quantize_kv_int8
+                quantize_kv_int8=quantize_kv_int8,
             )
             next_token = self._sample_next_token(logits[:, -1, :], temperature, top_k)
             curr_ids = torch.cat([curr_ids, next_token], dim=1)
-
             if (next_token == eos_id).all():
                 break
 
