@@ -1,8 +1,9 @@
 CC ?= gcc
 ARCH := $(shell uname -m)
 
-PIC_CFLAGS ?= -O3 -ffp-contract=off -fopenmp -Wall -Wextra -Werror -fPIC -I. -Icsrc
-EXE_CFLAGS ?= -O3 -ffp-contract=off -fopenmp -Wall -Wextra -Werror -I. -Icsrc
+CFLAGS ?= -O3 -ffp-contract=off -fopenmp -Wall -Wextra -Werror -I. -Icsrc
+PIC_CFLAGS ?= $(CFLAGS) -fPIC
+EXE_CFLAGS ?= $(CFLAGS)
 AVX2_FLAGS = -mavx2 -mfma -DTRACE_ENABLE_AVX2
 
 ifeq ($(ARCH),x86_64)

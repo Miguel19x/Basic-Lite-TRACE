@@ -139,6 +139,19 @@ static const char* scan_json_key(const char* start, const char* end, const char*
     return NULL;
 }
 
+static int pread_exact(int fd, void* buf, size_t len, off_t off) {
+    uint8_t* p = (uint8_t*)buf;
+    size_t total = 0;
+    while (total < len) {
+        ssize_t n = pread(fd, p + total, len - total, off + (off_t)total);
+        if (n <= 0) {
+            return -1;
+        }
+        total += (size_t)n;
+    }
+    return 0;
+}
+
 int trace_model_load_odirect(const char* bin_path, TraceModel* model) {
     memset(model, 0, sizeof(TraceModel));
     model->fd = -1; // Inicialización estricta tras memset
@@ -270,8 +283,7 @@ int trace_model_load_odirect(const char* bin_path, TraceModel* model) {
         trace_model_free(model);
         return -7;
     }
-    ssize_t meta_read = pread(fd_meta, json_buf, json_len, (off_t)idx_off);
-    if (meta_read != (ssize_t)json_len) {
+    if (pread_exact(fd_meta, json_buf, json_len, (off_t)idx_off) != 0) {
         free(json_buf);
         close(fd_meta);
         trace_model_free(model);
@@ -331,23 +343,23 @@ int trace_model_load_odirect(const char* bin_path, TraceModel* model) {
             // Suma estricta de res_off en todas las lecturas de tensores y escalares
             if (dest_ptr) {
                 *dest_ptr = (float*)malloc(t_length);
-                if (*dest_ptr && pread(fd_meta, *dest_ptr, t_length, (off_t)(res_off + t_offset)) == (ssize_t)t_length) {
+                if (*dest_ptr && pread_exact(fd_meta, *dest_ptr, t_length, (off_t)(res_off + t_offset)) == 0) {
                     mapped_count++;
                 }
             } else if (strcmp(name, "resident_core.alpha_z") == 0) {
-                if (pread(fd_meta, &model->alpha_z, sizeof(float), (off_t)(res_off + t_offset)) == (ssize_t)sizeof(float)) {
+                if (pread_exact(fd_meta, &model->alpha_z, sizeof(float), (off_t)(res_off + t_offset)) == 0) {
                     mapped_count++;
                 }
             } else if (strcmp(name, "resident_core.beta_y") == 0) {
-                if (pread(fd_meta, &model->beta_y, sizeof(float), (off_t)(res_off + t_offset)) == (ssize_t)sizeof(float)) {
+                if (pread_exact(fd_meta, &model->beta_y, sizeof(float), (off_t)(res_off + t_offset)) == 0) {
                     mapped_count++;
                 }
             } else if (strcmp(name, "resident_core.carry_gate") == 0) {
-                if (pread(fd_meta, &model->carry_gate, sizeof(float), (off_t)(res_off + t_offset)) == (ssize_t)sizeof(float)) {
+                if (pread_exact(fd_meta, &model->carry_gate, sizeof(float), (off_t)(res_off + t_offset)) == 0) {
                     mapped_count++;
                 }
             } else if (strcmp(name, "resident_core.halt_gate.bias") == 0) {
-                if (pread(fd_meta, &model->halt_gate_b, sizeof(float), (off_t)(res_off + t_offset)) == (ssize_t)sizeof(float)) {
+                if (pread_exact(fd_meta, &model->halt_gate_b, sizeof(float), (off_t)(res_off + t_offset)) == 0) {
                     mapped_count++;
                 }
             }

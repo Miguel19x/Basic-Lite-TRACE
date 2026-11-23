@@ -66,6 +66,19 @@ static int scan_json_int_array(const char* start, const char* end, const char* k
     return count;
 }
 
+static int pread_exact(int fd, void* buf, size_t len, off_t off) {
+    uint8_t* p = (uint8_t*)buf;
+    size_t total = 0;
+    while (total < len) {
+        ssize_t n = pread(fd, p + total, len - total, off + (off_t)total);
+        if (n <= 0) {
+            return -1;
+        }
+        total += (size_t)n;
+    }
+    return 0;
+}
+
 TraceLMModel* trace_lm_load(const char* bin_path) {
     if (!bin_path) return NULL;
 
@@ -174,7 +187,7 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
         return NULL;
     }
 
-    if (pread(fd_meta, json_buf, json_len, (off_t)idx_off) != (ssize_t)json_len) {
+    if (pread_exact(fd_meta, json_buf, json_len, (off_t)idx_off) != 0) {
         free(json_buf);
         close(fd_meta);
         trace_lm_free(model);
@@ -283,18 +296,27 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
             if (strcmp(name, "tok_emb.weight") == 0) {
                 model->tok_emb = (float*)malloc(t_len);
                 if (model->tok_emb) {
-                    pread(fd_meta, model->tok_emb, t_len, (off_t)(res_off + t_off));
+                    if (pread_exact(fd_meta, model->tok_emb, t_len, (off_t)(res_off + t_off)) != 0) {
+                        free(model->tok_emb);
+                        model->tok_emb = NULL;
+                    }
                 }
             } else if (strcmp(name, "final_norm.weight") == 0) {
                 model->final_norm_w = (float*)malloc(t_len);
                 if (model->final_norm_w) {
-                    pread(fd_meta, model->final_norm_w, t_len, (off_t)(res_off + t_off));
+                    if (pread_exact(fd_meta, model->final_norm_w, t_len, (off_t)(res_off + t_off)) != 0) {
+                        free(model->final_norm_w);
+                        model->final_norm_w = NULL;
+                    }
                 }
             } else if (strcmp(name, "lm_head.weight") == 0) {
                 if (!model->cfg.tie_word_embeddings) {
                     model->lm_head_w = (float*)malloc(t_len);
                     if (model->lm_head_w) {
-                        pread(fd_meta, model->lm_head_w, t_len, (off_t)(res_off + t_off));
+                        if (pread_exact(fd_meta, model->lm_head_w, t_len, (off_t)(res_off + t_off)) != 0) {
+                            free(model->lm_head_w);
+                            model->lm_head_w = NULL;
+                        }
                     }
                 }
             } else if (strncmp(name, "layers.", 7) == 0) {
@@ -304,13 +326,28 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
                     const char* field = dot + 1;
                     if (strcmp(field, "attn_norm.weight") == 0) {
                         model->layers[layer_idx].attn_norm_w = (float*)malloc(t_len);
-                        pread(fd_meta, model->layers[layer_idx].attn_norm_w, t_len, (off_t)(res_off + t_off));
+                        if (model->layers[layer_idx].attn_norm_w) {
+                            if (pread_exact(fd_meta, model->layers[layer_idx].attn_norm_w, t_len, (off_t)(res_off + t_off)) != 0) {
+                                free(model->layers[layer_idx].attn_norm_w);
+                                model->layers[layer_idx].attn_norm_w = NULL;
+                            }
+                        }
                     } else if (strcmp(field, "ffn_norm.weight") == 0) {
                         model->layers[layer_idx].ffn_norm_w = (float*)malloc(t_len);
-                        pread(fd_meta, model->layers[layer_idx].ffn_norm_w, t_len, (off_t)(res_off + t_off));
+                        if (model->layers[layer_idx].ffn_norm_w) {
+                            if (pread_exact(fd_meta, model->layers[layer_idx].ffn_norm_w, t_len, (off_t)(res_off + t_off)) != 0) {
+                                free(model->layers[layer_idx].ffn_norm_w);
+                                model->layers[layer_idx].ffn_norm_w = NULL;
+                            }
+                        }
                     } else if (strcmp(field, "attn.kv_norm.weight") == 0) {
                         model->layers[layer_idx].kv_norm_w = (float*)malloc(t_len);
-                        pread(fd_meta, model->layers[layer_idx].kv_norm_w, t_len, (off_t)(res_off + t_off));
+                        if (model->layers[layer_idx].kv_norm_w) {
+                            if (pread_exact(fd_meta, model->layers[layer_idx].kv_norm_w, t_len, (off_t)(res_off + t_off)) != 0) {
+                                free(model->layers[layer_idx].kv_norm_w);
+                                model->layers[layer_idx].kv_norm_w = NULL;
+                            }
+                        }
                     } else if (strstr(field, "sub_ln.weight") != NULL) {
                         TraceLMPagedLinear* target_lin = NULL;
                         if (strcmp(field, "attn.w_dkv.sub_ln.weight") == 0) target_lin = &model->layers[layer_idx].w_dkv;
@@ -323,7 +360,12 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
 
                         if (target_lin) {
                             target_lin->sub_ln_w = (float*)malloc(t_len);
-                            pread(fd_meta, target_lin->sub_ln_w, t_len, (off_t)(res_off + t_off));
+                            if (target_lin->sub_ln_w) {
+                                if (pread_exact(fd_meta, target_lin->sub_ln_w, t_len, (off_t)(res_off + t_off)) != 0) {
+                                    free(target_lin->sub_ln_w);
+                                    target_lin->sub_ln_w = NULL;
+                                }
+                            }
                         }
                     }
                 }
