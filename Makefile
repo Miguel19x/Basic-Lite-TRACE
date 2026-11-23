@@ -49,6 +49,7 @@ test: all
 	PYTHONPATH=. $(PYTHON) tests/test_avx2_kernel.py
 	PYTHONPATH=. $(PYTHON) tests/test_trace_infer.py
 	PYTHONPATH=. $(PYTHON) tests/test_trace_lm_infer.py
+	PYTHONPATH=. $(PYTHON) tests/test_parity_fase3.py
 
 lint:
 	@if [ -f venv/bin/ruff ]; then venv/bin/ruff check .; else echo "ruff no instalado en venv, omitiendo linting"; fi

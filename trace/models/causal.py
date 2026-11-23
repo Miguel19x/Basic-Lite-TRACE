@@ -466,6 +466,12 @@ class TRACECausalModel(nn.Module):
         ms_confs = [prob_ms_h, prob_ms_t, prob_ms_u]
         digit_confidences = pw_confs + pms_confs + watt_confs + ms_confs
 
+        def _safe_int(s: str) -> int | None:
+            try:
+                return int(s)
+            except (ValueError, TypeError):
+                return None
+
         meta = {
             "pw": pw_str,
             "pms": pms_str,
@@ -473,12 +479,12 @@ class TRACECausalModel(nn.Module):
             "pred_pms_raw": pred_pms_raw,
             "watt": watt_str,
             "ms": ms_str,
-            "pw_int": int(pw_str) if pw_str.isdigit() else None,
-            "pms_int": int(pms_str) if pms_str.isdigit() else None,
-            "pred_pw_raw_int": int(pred_pw_raw) if pred_pw_raw.isdigit() else None,
-            "pred_pms_raw_int": int(pred_pms_raw) if pred_pms_raw.isdigit() else None,
-            "watt_int": int(watt_str) if watt_str.isdigit() else None,
-            "ms_int": int(ms_str) if ms_str.isdigit() else None,
+            "pw_int": _safe_int(pw_str),
+            "pms_int": _safe_int(pms_str),
+            "pred_pw_raw_int": _safe_int(pred_pw_raw),
+            "pred_pms_raw_int": _safe_int(pred_pms_raw),
+            "watt_int": _safe_int(watt_str),
+            "ms_int": _safe_int(ms_str),
             "digit_confidences": digit_confidences,
         }
 
