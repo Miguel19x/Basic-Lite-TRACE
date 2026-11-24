@@ -28,9 +28,11 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 
-LIB_PATH = os.path.abspath("libtrace_lm.so")
-RESULTS_PATH = os.path.abspath("results/fase3_benchmark_results.json")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LIB_PATH = str(REPO_ROOT / "libtrace_lm.so")
+RESULTS_PATH = str(REPO_ROOT / "results" / "fase3_benchmark_results.json")
 
 
 def get_peak_rss_mb() -> float:
@@ -75,13 +77,18 @@ def load_c_lib():
     lib.trace_lm_sample_greedy.restype = ctypes.c_int
     lib.trace_lm_kv_get_last_common_prefix.argtypes = [ctypes.c_void_p]
     lib.trace_lm_kv_get_last_common_prefix.restype = ctypes.c_int
+    lib.trace_lm_get_vocab_size.argtypes = [ctypes.c_void_p]
+    lib.trace_lm_get_vocab_size.restype = ctypes.c_int
+    lib.trace_lm_get_config.argtypes = [ctypes.c_void_p]
+    lib.trace_lm_get_config.restype = ctypes.c_void_p
     return lib
 
 
-def run_c_chunked_prefill(lib, c_model, c_kv, c_ws, prompt: list[int], chunk_size: int = 128):
+def run_c_chunked_prefill(
+    lib, c_model, c_kv, c_ws, prompt: list[int], vocab_size: int, chunk_size: int = 128
+):
     """Ejecuta prefill en bloques de chunk_size tokens pasando siempre last_token_only=1."""
     L = len(prompt)
-    vocab_size = 4096
     c_logits = (ctypes.c_float * vocab_size)()
 
     for chunk_start in range(0, L, chunk_size):
@@ -89,7 +96,9 @@ def run_c_chunked_prefill(lib, c_model, c_kv, c_ws, prompt: list[int], chunk_siz
         sub_tokens = prompt[:chunk_end]
         c_tokens = (ctypes.c_int * chunk_end)(*sub_tokens)
         # Siempre last_token_only = 1 para evitar buffer overflow en c_logits
-        lib.trace_lm_forward(c_model, c_kv, c_tokens, chunk_end, c_logits, 1, c_ws)
+        ret = lib.trace_lm_forward(c_model, c_kv, c_tokens, chunk_end, c_logits, 1, c_ws)
+        if ret < 0:
+            raise RuntimeError(f"trace_lm_forward falló en prefill (chunk_end={chunk_end}) con código {ret}")
     return c_logits
 
 
@@ -97,12 +106,12 @@ def run_c_chunked_prefill(lib, c_model, c_kv, c_ws, prompt: list[int], chunk_siz
 # Definición de Clases PyTorch (Importadas Solo Bajo Demanda)
 # =====================================================================
 def get_canonical_mha_class():
-    from trace.layers.norm import RMSNorm
-    from trace.lm.model import TRACELMConfig
-
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
+
+    from trace.layers.norm import RMSNorm
+    from trace.lm.model import TRACELMConfig
 
     class CanonicalMHACausalLayer(nn.Module):
         def __init__(self, d_model: int, n_heads: int, d_ff: int):
@@ -173,57 +182,80 @@ def get_canonical_mha_class():
 # =====================================================================
 # Ejecutor Aislado por Subproceso (Worker)
 # =====================================================================
-def run_worker(variant: str, model_bin: str, context_lens: list[int], decode_steps: int):
+def run_worker(variant: str, model_bin: str | None, context_lens: list[int], decode_steps: int):
     results = {}
-    vocab_size = 4096
 
     if variant in ["trace_c_int8", "trace_c_fp32"]:
+        if not model_bin:
+            raise ValueError(f"--model_bin es obligatorio para la variante C '{variant}'")
         # Subproceso C puro: SIN import de torch para RSS limpio
         lib = load_c_lib()
-        c_model = lib.trace_lm_load(model_bin.encode())
+        c_model = lib.trace_lm_load(model_bin.encode("utf-8"))
+        if not c_model:
+            raise RuntimeError(f"trace_lm_load devolvió NULL para: {model_bin}")
+        c_cfg = lib.trace_lm_get_config(c_model)
+        if not c_cfg:
+            lib.trace_lm_free(c_model)
+            raise RuntimeError("trace_lm_get_config devolvió NULL")
+        vocab_size = int(lib.trace_lm_get_vocab_size(c_model))
+        if vocab_size <= 0:
+            lib.trace_lm_free(c_model)
+            raise RuntimeError(f"vocab_size inválido desde modelo C: {vocab_size}")
         use_int8 = 1 if variant == "trace_c_int8" else 0
-        c_ws = lib.trace_lm_workspace_create(c_model, 128)
+        c_ws = lib.trace_lm_workspace_create(c_cfg, 128)
+        if not c_ws:
+            lib.trace_lm_free(c_model)
+            raise RuntimeError("trace_lm_workspace_create devolvió NULL")
 
-        for L in context_lens:
-            prompt = [(i * 31 + 5) % vocab_size for i in range(L)]
-            c_kv = lib.trace_lm_kv_create(c_model, L + decode_steps + 16, use_int8)
+        try:
+            for L in context_lens:
+                prompt = [(i * 31 + 5) % vocab_size for i in range(L)]
+                c_kv = lib.trace_lm_kv_create(c_cfg, L + decode_steps + 16, use_int8)
+                if not c_kv:
+                    raise RuntimeError(f"trace_lm_kv_create devolvió NULL para L={L}")
+                try:
+                    # 1. Medir TTFT (Chunked Prefill)
+                    t0 = time.perf_counter()
+                    logits_last = run_c_chunked_prefill(
+                        lib, c_model, c_kv, c_ws, prompt, vocab_size=vocab_size, chunk_size=128
+                    )
+                    ttft_ms = (time.perf_counter() - t0) * 1000.0
 
-            # 1. Medir TTFT (Chunked Prefill)
-            t0 = time.perf_counter()
-            logits_last = run_c_chunked_prefill(lib, c_model, c_kv, c_ws, prompt, chunk_size=128)
-            ttft_ms = (time.perf_counter() - t0) * 1000.0
+                    # 2. Medir Throughput de Decodificación (S = 1)
+                    next_tok = lib.trace_lm_sample_greedy(logits_last, vocab_size)
+                    curr_prompt = list(prompt)
+                    t_dec_start = time.perf_counter()
 
-            # 2. Medir Throughput de Decodificación (S = 1)
-            next_tok = lib.trace_lm_sample_greedy(logits_last, vocab_size)
-            curr_prompt = list(prompt)
-            t_dec_start = time.perf_counter()
+                    for _ in range(decode_steps):
+                        curr_prompt.append(next_tok)
+                        c_tokens = (ctypes.c_int * len(curr_prompt))(*curr_prompt)
+                        c_out = (ctypes.c_float * vocab_size)()
+                        ret = lib.trace_lm_forward(c_model, c_kv, c_tokens, len(curr_prompt), c_out, 1, c_ws)
+                        if ret < 0:
+                            raise RuntimeError(f"trace_lm_forward falló en decode con código {ret}")
+                        next_tok = lib.trace_lm_sample_greedy(c_out, vocab_size)
 
-            for _ in range(decode_steps):
-                curr_prompt.append(next_tok)
-                c_tokens = (ctypes.c_int * len(curr_prompt))(*curr_prompt)
-                c_out = (ctypes.c_float * vocab_size)()
-                lib.trace_lm_forward(c_model, c_kv, c_tokens, len(curr_prompt), c_out, 1, c_ws)
-                next_tok = lib.trace_lm_sample_greedy(c_out, vocab_size)
+                    t_dec_total = time.perf_counter() - t_dec_start
+                    tok_per_sec = decode_steps / max(1e-6, t_dec_total)
 
-            t_dec_total = time.perf_counter() - t_dec_start
-            tok_per_sec = decode_steps / max(1e-6, t_dec_total)
-
-            results[str(L)] = {
-                "ttft_ms": round(ttft_ms, 2),
-                "decode_tok_per_sec": round(tok_per_sec, 2),
-            }
-            lib.trace_lm_kv_free(c_kv)
-
-        lib.trace_lm_workspace_free(c_ws)
-        lib.trace_lm_free(c_model)
+                    results[str(L)] = {
+                        "ttft_ms": round(ttft_ms, 2),
+                        "decode_tok_per_sec": round(tok_per_sec, 2),
+                    }
+                finally:
+                    lib.trace_lm_kv_free(c_kv)
+        finally:
+            lib.trace_lm_workspace_free(c_ws)
+            lib.trace_lm_free(c_model)
 
     elif variant == "pytorch_trace":
-        from trace.lm.model import TRACELanguageModel, TRACELMConfig
-
         import torch
+
+        from trace.lm.model import TRACELanguageModel, TRACELMConfig
 
         torch.set_num_threads(2)
         cfg = TRACELMConfig.preset_25m()
+        vocab_size = cfg.vocab_size
         cfg.max_seq_len = 4096 + decode_steps + 16
         model = TRACELanguageModel(cfg)
         model.eval()
@@ -262,12 +294,13 @@ def run_worker(variant: str, model_bin: str, context_lens: list[int], decode_ste
             }
 
     elif variant == "pytorch_mha":
-        from trace.lm.model import TRACELMConfig
-
         import torch
+
+        from trace.lm.model import TRACELMConfig
 
         torch.set_num_threads(2)
         cfg = TRACELMConfig.preset_25m()
+        vocab_size = cfg.vocab_size
         cfg.max_seq_len = 4096 + decode_steps + 16
         DenseMHAClass = get_canonical_mha_class()
         model = DenseMHAClass(cfg)
@@ -315,56 +348,79 @@ def run_worker(variant: str, model_bin: str, context_lens: list[int], decode_ste
 # =====================================================================
 def run_prefix_caching_benchmark(model_bin: str) -> dict:
     lib = load_c_lib()
-    c_model = lib.trace_lm_load(model_bin.encode())
-    c_ws = lib.trace_lm_workspace_create(c_model, 128)
-    vocab_size = 4096
+    c_model = lib.trace_lm_load(model_bin.encode("utf-8"))
+    if not c_model:
+        raise RuntimeError(f"trace_lm_load devolvió NULL para: {model_bin}")
+    c_cfg = lib.trace_lm_get_config(c_model)
+    if not c_cfg:
+        lib.trace_lm_free(c_model)
+        raise RuntimeError("trace_lm_get_config devolvió NULL")
+    vocab_size = int(lib.trace_lm_get_vocab_size(c_model))
+    if vocab_size <= 0:
+        lib.trace_lm_free(c_model)
+        raise RuntimeError(f"vocab_size inválido desde modelo C: {vocab_size}")
+    c_ws = lib.trace_lm_workspace_create(c_cfg, 128)
+    if not c_ws:
+        lib.trace_lm_free(c_model)
+        raise RuntimeError("trace_lm_workspace_create devolvió NULL")
     L = 256
 
     prompt_a = [(i * 47 + 13) % vocab_size for i in range(L)]
 
-    # 1. Frío (0% reutilizado)
-    c_kv_cold = lib.trace_lm_kv_create(c_model, 512, 1)
-    t0 = time.perf_counter()
-    run_c_chunked_prefill(lib, c_model, c_kv_cold, c_ws, prompt_a, chunk_size=128)
-    cold_ms = (time.perf_counter() - t0) * 1000.0
-    lib.trace_lm_kv_free(c_kv_cold)
+    try:
+        # 1. Frío (0% reutilizado)
+        c_kv_cold = lib.trace_lm_kv_create(c_cfg, 512, 1)
+        if not c_kv_cold:
+            raise RuntimeError("trace_lm_kv_create devolvió NULL para benchmark en frío")
+        try:
+            t0 = time.perf_counter()
+            run_c_chunked_prefill(lib, c_model, c_kv_cold, c_ws, prompt_a, vocab_size=vocab_size, chunk_size=128)
+            cold_ms = (time.perf_counter() - t0) * 1000.0
+        finally:
+            lib.trace_lm_kv_free(c_kv_cold)
 
-    reuse_cases = {
-        "50%": int(L * 0.50),  # 128 tokens
-        "75%": int(L * 0.75),  # 192 tokens
-        "90%": int(L * 0.90),  # 230 tokens
-    }
-
-    pfx_data = {"cold_ttft_ms": round(cold_ms, 2), "cases": {}}
-
-    for label, reuse_len in reuse_cases.items():
-        # Reiniciar y precargar prompt_a antes de cada caso para evitar contaminación cruzada
-        c_kv = lib.trace_lm_kv_create(c_model, 512, 1)
-        run_c_chunked_prefill(lib, c_model, c_kv, c_ws, prompt_a, chunk_size=128)
-
-        # Construir prompt con reuse_len tokens idénticos y el resto nuevos
-        prompt_var = prompt_a[:reuse_len] + [((i + 999) * 17) % vocab_size for i in range(L - reuse_len)]
-        c_tokens_var = (ctypes.c_int * len(prompt_var))(*prompt_var)
-        c_out = (ctypes.c_float * vocab_size)()
-
-        t_start = time.perf_counter()
-        lib.trace_lm_forward(c_model, c_kv, c_tokens_var, len(prompt_var), c_out, 1, c_ws)
-        cached_ms = (time.perf_counter() - t_start) * 1000.0
-
-        pfx_recorded = lib.trace_lm_kv_get_last_common_prefix(c_kv)
-        assert pfx_recorded == reuse_len, f"Prefix caching discrepancia: {pfx_recorded} != {reuse_len}"
-
-        speedup = cold_ms / max(1e-4, cached_ms)
-        pfx_data["cases"][label] = {
-            "cached_tokens": reuse_len,
-            "processed_tokens": L - reuse_len,
-            "ttft_ms": round(cached_ms, 2),
-            "speedup": round(speedup, 2),
+        reuse_cases = {
+            "50%": int(L * 0.50),  # 128 tokens
+            "75%": int(L * 0.75),  # 192 tokens
+            "90%": int(L * 0.90),  # 230 tokens
         }
-        lib.trace_lm_kv_free(c_kv)
 
-    lib.trace_lm_workspace_free(c_ws)
-    lib.trace_lm_free(c_model)
+        pfx_data = {"cold_ttft_ms": round(cold_ms, 2), "cases": {}}
+
+        for label, reuse_len in reuse_cases.items():
+            # Reiniciar y precargar prompt_a antes de cada caso para evitar contaminación cruzada
+            c_kv = lib.trace_lm_kv_create(c_cfg, 512, 1)
+            if not c_kv:
+                raise RuntimeError(f"trace_lm_kv_create devolvió NULL para prefix caching ({label})")
+            try:
+                run_c_chunked_prefill(lib, c_model, c_kv, c_ws, prompt_a, vocab_size=vocab_size, chunk_size=128)
+
+                # Construir prompt con reuse_len tokens idénticos y el resto nuevos
+                prompt_var = prompt_a[:reuse_len] + [((i + 999) * 17) % vocab_size for i in range(L - reuse_len)]
+                c_tokens_var = (ctypes.c_int * len(prompt_var))(*prompt_var)
+                c_out = (ctypes.c_float * vocab_size)()
+
+                t_start = time.perf_counter()
+                ret = lib.trace_lm_forward(c_model, c_kv, c_tokens_var, len(prompt_var), c_out, 1, c_ws)
+                if ret < 0:
+                    raise RuntimeError(f"trace_lm_forward falló en prefix caching ({label}) con código {ret}")
+                cached_ms = (time.perf_counter() - t_start) * 1000.0
+
+                pfx_recorded = lib.trace_lm_kv_get_last_common_prefix(c_kv)
+                assert pfx_recorded == reuse_len, f"Prefix caching discrepancia: {pfx_recorded} != {reuse_len}"
+
+                speedup = cold_ms / max(1e-4, cached_ms)
+                pfx_data["cases"][label] = {
+                    "cached_tokens": reuse_len,
+                    "processed_tokens": L - reuse_len,
+                    "ttft_ms": round(cached_ms, 2),
+                    "speedup": round(speedup, 2),
+                }
+            finally:
+                lib.trace_lm_kv_free(c_kv)
+    finally:
+        lib.trace_lm_workspace_free(c_ws)
+        lib.trace_lm_free(c_model)
     return pfx_data
 
 

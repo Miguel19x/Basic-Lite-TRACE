@@ -90,14 +90,16 @@ int trace_lm_kv_find_common_prefix(TraceLMKVCache* kv, const int* tokens, int nu
 }
 
 void trace_lm_kv_commit_tokens(TraceLMKVCache* kv, const int* tokens, int start_pos, int count) {
-    if (!kv || count <= 0) return;
+    if (!kv || !tokens || start_pos < 0 || count <= 0) return;
     for (int i = 0; i < count; ++i) {
         if (start_pos + i < kv->max_seq_len) {
             kv->cached_tokens[start_pos + i] = tokens[i];
         }
     }
     // Trunca explicitamente la longitud para descartar ramas divergentes previas
-    kv->current_seq_len = start_pos + count;
+    int new_len = start_pos + count;
+    if (new_len > kv->max_seq_len) new_len = kv->max_seq_len;
+    kv->current_seq_len = new_len;
 }
 
 void trace_lm_kv_store(
@@ -107,11 +109,15 @@ void trace_lm_kv_store(
     const float* c_kv_token,
     const float* k_pe_token
 ) {
-    if (!kv || pos >= kv->max_seq_len) return;
+    if (!kv || !c_kv_token || !k_pe_token ||
+        layer_idx < 0 || layer_idx >= kv->n_layers ||
+        pos < 0 || pos >= kv->max_seq_len) {
+        return;
+    }
 
     // 1. Guardar k_pe en float32
     size_t k_pe_offset = ((size_t)layer_idx * (size_t)kv->max_seq_len + (size_t)pos) * (size_t)kv->qk_rope_head_dim;
-    memcpy(kv->k_pe + k_pe_offset, k_pe_token, sizeof(float) * kv->qk_rope_head_dim);
+    memcpy(kv->k_pe + k_pe_offset, k_pe_token, sizeof(float) * (size_t)kv->qk_rope_head_dim);
 
     // 2. Guardar c_kv (INT8 con escala o FP32 continuo)
     if (kv->use_int8_kv) {
@@ -128,14 +134,15 @@ void trace_lm_kv_store(
 
         size_t i8_offset = scale_idx * (size_t)kv->kv_lora_rank;
         for (int c = 0; c < kv->kv_lora_rank; ++c) {
-            float q = roundf(c_kv_token[c] * scale_inv);
-            if (q > 127.0f) q = 127.0f;
+            float q = nearbyintf(c_kv_token[c] * scale_inv);
+            if (!isfinite(q)) q = 0.0f;
+            else if (q > 127.0f) q = 127.0f;
             else if (q < -127.0f) q = -127.0f;
-            kv->c_kv_i8[i8_offset + c] = (int8_t)q;
+            kv->c_kv_i8[i8_offset + (size_t)c] = (int8_t)q;
         }
     } else {
         size_t fp32_offset = ((size_t)layer_idx * (size_t)kv->max_seq_len + (size_t)pos) * (size_t)kv->kv_lora_rank;
-        memcpy(kv->c_kv_fp32 + fp32_offset, c_kv_token, sizeof(float) * kv->kv_lora_rank);
+        memcpy(kv->c_kv_fp32 + fp32_offset, c_kv_token, sizeof(float) * (size_t)kv->kv_lora_rank);
     }
 }
 
@@ -145,7 +152,11 @@ void trace_lm_kv_get_c_kv(
     int pos,
     float* c_kv_out
 ) {
-    if (!kv || pos >= kv->max_seq_len) return;
+    if (!kv || !c_kv_out ||
+        layer_idx < 0 || layer_idx >= kv->n_layers ||
+        pos < 0 || pos >= kv->max_seq_len) {
+        return;
+    }
 
     if (kv->use_int8_kv) {
         size_t scale_idx = (size_t)layer_idx * (size_t)kv->max_seq_len + (size_t)pos;
@@ -157,7 +168,7 @@ void trace_lm_kv_get_c_kv(
         }
     } else {
         size_t fp32_offset = ((size_t)layer_idx * (size_t)kv->max_seq_len + (size_t)pos) * (size_t)kv->kv_lora_rank;
-        memcpy(c_kv_out, kv->c_kv_fp32 + fp32_offset, sizeof(float) * kv->kv_lora_rank);
+        memcpy(c_kv_out, kv->c_kv_fp32 + fp32_offset, sizeof(float) * (size_t)kv->kv_lora_rank);
     }
 }
 
@@ -166,7 +177,9 @@ const float* trace_lm_kv_get_k_pe(
     int layer_idx,
     int pos
 ) {
-    if (!kv || pos >= kv->max_seq_len) return NULL;
+    if (!kv || layer_idx < 0 || layer_idx >= kv->n_layers || pos < 0 || pos >= kv->max_seq_len) {
+        return NULL;
+    }
     size_t k_pe_offset = ((size_t)layer_idx * (size_t)kv->max_seq_len + (size_t)pos) * (size_t)kv->qk_rope_head_dim;
     return kv->k_pe + k_pe_offset;
 }

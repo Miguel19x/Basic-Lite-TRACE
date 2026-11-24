@@ -8,11 +8,13 @@
 
 #define _GNU_SOURCE
 #include "trace_lm.h"
+#include "../trace_infer.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <math.h>
 
@@ -71,8 +73,14 @@ static int pread_exact(int fd, void* buf, size_t len, off_t off) {
     uint8_t* p = (uint8_t*)buf;
     size_t total = 0;
     while (total < len) {
-        ssize_t n = pread(fd, p + total, len - total, off + (off_t)total);
-        if (n <= 0) {
+        size_t remain = len - total;
+        size_t chunk = (remain > 0x7ffff000U) ? 0x7ffff000U : remain;
+        ssize_t n = pread(fd, p + total, chunk, off + (off_t)total);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) {
             return -1;
         }
         total += (size_t)n;
@@ -123,9 +131,13 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
         return NULL;
     }
 
-    ssize_t r = pread(fd, scratch, 4096, 0);
+    ssize_t r;
+    do {
+        r = pread(fd, scratch, 4096, 0);
+    } while (r < 0 && errno == EINTR);
     if (r < 0 && errno == EINVAL && used_odirect) {
         close(fd);
+        model->fd = -1;
         fd = open(bin_path, O_RDONLY);
         if (fd < 0) {
             free(scratch);
@@ -133,11 +145,11 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
             return NULL;
         }
         used_odirect = 0;
-        if (model) {
-            model->fd = fd;
-            model->used_odirect = 0;
-        }
-        r = pread(fd, scratch, 4096, 0);
+        model->fd = fd;
+        model->used_odirect = 0;
+        do {
+            r = pread(fd, scratch, 4096, 0);
+        } while (r < 0 && errno == EINTR);
     }
     model->pread_calls++;
     if (r < 64 || memcmp(scratch, "PBITCOS1", 8) != 0) {
@@ -146,10 +158,19 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
         return NULL;
     }
 
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 64) {
+        free(scratch);
+        trace_lm_free(model);
+        return NULL;
+    }
+    uint64_t file_size = (uint64_t)st.st_size;
+
     const uint8_t* hdr = (const uint8_t*)scratch;
-    uint32_t page_sz, total_pages;
+    uint32_t page_sz, fmt_code, total_pages;
     uint64_t idx_off, exp_off, res_off, pages_off, total_sz;
     memcpy(&page_sz, hdr + 8, 4);
+    memcpy(&fmt_code, hdr + 12, 4);
     memcpy(&total_pages, hdr + 16, 4);
     memcpy(&idx_off, hdr + 20, 8);
     memcpy(&exp_off, hdr + 28, 8);
@@ -158,20 +179,59 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
     memcpy(&total_sz, hdr + 52, 8);
     free(scratch);
 
-    // 3. Cargar todo el pool de páginas en 1 única syscall pread alineada
-    size_t pool_size = total_sz - pages_off;
+    if (fmt_code != 1 ||
+        page_sz < sizeof(PagedHeader) ||
+        idx_off > exp_off || exp_off > file_size ||
+        res_off > pages_off || pages_off > total_sz || total_sz > file_size) {
+        trace_lm_free(model);
+        return NULL;
+    }
+
+    uint64_t json_len_u64 = exp_off - idx_off;
+    if (json_len_u64 == 0 || json_len_u64 > (uint64_t)(64u * 1024u * 1024u)) {
+        trace_lm_free(model);
+        return NULL;
+    }
+
+    // 3. Cargar todo el pool de páginas en lecturas alineadas (chunk <= 0x7ffff000)
+    uint64_t pool_size_u64 = total_sz - pages_off;
+    if (total_pages == 0 ||
+        pool_size_u64 == 0 ||
+        (uint64_t)total_pages > pool_size_u64 / (uint64_t)page_sz) {
+        trace_lm_free(model);
+        return NULL;
+    }
+    size_t pool_size = (size_t)pool_size_u64;
+    if (pool_size < (size_t)total_pages * (size_t)page_sz) {
+        trace_lm_free(model);
+        return NULL;
+    }
     model->page_pool_bytes = pool_size;
     if (posix_memalign(&model->page_pool, 4096, pool_size) != 0) {
         trace_lm_free(model);
         return NULL;
     }
 
-    ssize_t n_read = pread(fd, model->page_pool, pool_size, (off_t)pages_off);
-    model->pread_calls++;
-    if (n_read != (ssize_t)pool_size) {
-        trace_lm_free(model);
-        return NULL;
+    size_t pool_read = 0;
+    while (pool_read < pool_size) {
+        size_t remain = pool_size - pool_read;
+        size_t chunk = (remain > 0x7ffff000U) ? 0x7ffff000U : remain;
+        ssize_t n_read = pread(fd, (uint8_t*)model->page_pool + pool_read, chunk, (off_t)(pages_off + pool_read));
+        if (n_read < 0) {
+            if (errno == EINTR) continue;
+            trace_lm_free(model);
+            return NULL;
+        }
+        if (n_read == 0) {
+            trace_lm_free(model);
+            return NULL;
+        }
+        model->pread_calls++;
+        pool_read += (size_t)n_read;
     }
+
+    close(fd);
+    model->fd = -1;
 
     // 4. Leer metadatos JSON e índice
     int fd_meta = open(bin_path, O_RDONLY);
@@ -180,7 +240,7 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
         return NULL;
     }
 
-    size_t json_len = exp_off - idx_off;
+    size_t json_len = (size_t)json_len_u64;
     char* json_buf = (char*)malloc(json_len + 1);
     if (!json_buf) {
         close(fd_meta);
@@ -233,6 +293,24 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
     model->cfg.mask_token_id = scan_json_int(cfg_p, cfg_end, "mask_token_id", 257);
     model->cfg.bos_token_id = scan_json_int(cfg_p, cfg_end, "bos_token_id", 258);
     model->cfg.eos_token_id = scan_json_int(cfg_p, cfg_end, "eos_token_id", 259);
+
+    if (model->cfg.d_model <= 0 ||
+        model->cfg.n_layers <= 0 ||
+        model->cfg.n_heads <= 0 ||
+        model->cfg.d_ff <= 0 ||
+        model->cfg.kv_lora_rank <= 0 ||
+        model->cfg.qk_nope_head_dim <= 0 ||
+        model->cfg.qk_rope_head_dim <= 0 || (model->cfg.qk_rope_head_dim % 2) != 0 ||
+        model->cfg.v_head_dim <= 0 ||
+        model->cfg.vocab_size <= 0 ||
+        model->cfg.max_seq_len <= 0 ||
+        !(model->cfg.eps > 0.0f) || !isfinite(model->cfg.eps) ||
+        model->cfg.pad_token_id < 0 || model->cfg.pad_token_id >= model->cfg.vocab_size) {
+        free(json_buf);
+        close(fd_meta);
+        trace_lm_free(model);
+        return NULL;
+    }
 
     // Alojar capas
     model->layers = (TraceLMLayer*)calloc(model->cfg.n_layers, sizeof(TraceLMLayer));
@@ -293,6 +371,13 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
             const char* len_ptr = scan_json_key(name_end, obj_end, "length");
             uint64_t t_off = off_ptr ? strtoull(off_ptr, NULL, 10) : 0;
             uint64_t t_len = len_ptr ? strtoull(len_ptr, NULL, 10) : 0;
+
+            if (t_len == 0 || t_off > file_size - res_off || t_len > file_size - res_off - t_off) {
+                free(json_buf);
+                close(fd_meta);
+                trace_lm_free(model);
+                return NULL;
+            }
 
             if (strcmp(name, "tok_emb.weight") == 0) {
                 model->tok_emb = (float*)malloc(t_len);
@@ -400,13 +485,67 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
                         int num_p = scan_json_int(name_end, obj_end, "num_pages", 0);
                         lin->num_pages = num_p;
 
-                        if (num_p > 0) {
-                            int* pids = (int*)malloc(sizeof(int) * num_p);
-                            int scanned_p = scan_json_int_array(name_end, obj_end, "page_ids", pids, num_p);
-                            const uint8_t** ptrs = (const uint8_t**)malloc(sizeof(uint8_t*) * scanned_p);
-                            for (int k = 0; k < scanned_p; ++k) {
-                                ptrs[k] = (const uint8_t*)model->page_pool + ((size_t)pids[k] * page_sz);
+                        if (num_p > 0 && lin->in_features > 0 && lin->out_features > 0) {
+                            int* pids = (int*)malloc(sizeof(int) * (size_t)num_p);
+                            if (!pids) {
+                                free(json_buf);
+                                close(fd_meta);
+                                trace_lm_free(model);
+                                return NULL;
                             }
+                            int scanned_p = scan_json_int_array(name_end, obj_end, "page_ids", pids, num_p);
+                            if (scanned_p != num_p) {
+                                free(pids);
+                                free(json_buf);
+                                close(fd_meta);
+                                trace_lm_free(model);
+                                return NULL;
+                            }
+                            const uint8_t** ptrs = (const uint8_t**)malloc(sizeof(uint8_t*) * (size_t)scanned_p);
+                            if (!ptrs) {
+                                free(pids);
+                                free(json_buf);
+                                close(fd_meta);
+                                trace_lm_free(model);
+                                return NULL;
+                            }
+                            for (int k = 0; k < scanned_p; ++k) {
+                                if (pids[k] < 0 || (uint32_t)pids[k] >= total_pages) {
+                                    free(ptrs);
+                                    free(pids);
+                                    free(json_buf);
+                                    close(fd_meta);
+                                    trace_lm_free(model);
+                                    return NULL;
+                                }
+                                size_t page_byte_off = (size_t)pids[k] * (size_t)page_sz;
+                                if (page_byte_off + (size_t)page_sz > pool_size) {
+                                    free(ptrs);
+                                    free(pids);
+                                    free(json_buf);
+                                    close(fd_meta);
+                                    trace_lm_free(model);
+                                    return NULL;
+                                }
+                                const uint8_t* pblob = (const uint8_t*)model->page_pool + page_byte_off;
+                                const PagedHeader* ph = (const PagedHeader*)pblob;
+                                uint64_t padded_cols = ((uint64_t)ph->cols + 31u) / 32u * 32u;
+                                uint64_t row_stride = padded_cols >> 2;
+                                uint64_t payload_bytes = (uint64_t)ph->rows * row_stride;
+                                if (ph->fmt_code != 1 ||
+                                    (int)ph->cols != lin->in_features ||
+                                    (uint64_t)ph->row_start + (uint64_t)ph->rows > (uint64_t)lin->out_features ||
+                                    sizeof(PagedHeader) + payload_bytes > (uint64_t)page_sz) {
+                                    free(ptrs);
+                                    free(pids);
+                                    free(json_buf);
+                                    close(fd_meta);
+                                    trace_lm_free(model);
+                                    return NULL;
+                                }
+                                ptrs[k] = pblob;
+                            }
+                            if (lin->page_ptrs) free((void*)lin->page_ptrs);
                             lin->page_ptrs = ptrs;
                             free(pids);
                         }
@@ -424,6 +563,31 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
 
     free(json_buf);
     close(fd_meta);
+
+    // Validar tensores obligatorios antes de devolver el modelo
+    if (!model->tok_emb || !model->lm_head_w || !model->final_norm_w) {
+        trace_lm_free(model);
+        return NULL;
+    }
+    for (int i = 0; i < model->cfg.n_layers; ++i) {
+        TraceLMLayer* l = &model->layers[i];
+        if (!l->attn_norm_w || !l->ffn_norm_w || !l->kv_norm_w) {
+            trace_lm_free(model);
+            return NULL;
+        }
+        const TraceLMPagedLinear* lins[9] = {
+            &l->w_dkv, &l->w_uk, &l->w_uv, &l->w_kr,
+            &l->w_q, &l->w_qr, &l->w_out, &l->ffn_up, &l->ffn_down
+        };
+        for (int k = 0; k < 9; ++k) {
+            if (!lins[k]->page_ptrs || lins[k]->num_pages <= 0 ||
+                lins[k]->in_features <= 0 || lins[k]->out_features <= 0) {
+                trace_lm_free(model);
+                return NULL;
+            }
+        }
+    }
+
     return model;
 }
 
@@ -473,4 +637,12 @@ int trace_lm_get_pread_calls(const TraceLMModel* model) {
 
 int trace_lm_get_used_odirect(const TraceLMModel* model) {
     return model ? model->used_odirect : 0;
+}
+
+const TraceLMConfig* trace_lm_get_config(const TraceLMModel* model) {
+    return model ? &model->cfg : NULL;
+}
+
+int trace_lm_get_vocab_size(const TraceLMModel* model) {
+    return model ? model->cfg.vocab_size : 0;
 }

@@ -20,15 +20,35 @@ Valida:
 import ctypes
 import math
 import os
+import struct
 import tempfile
-from trace.lm.model import TRACELanguageModel, TRACELMConfig
-from trace.serialization.paged_bitcos import PagedBitCOSReader, PagedBitCOSSerializer
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-LIB_PATH = os.path.abspath("libtrace_lm.so")
+from trace.lm.model import TRACELanguageModel, TRACELMConfig
+from trace.serialization.paged_bitcos import PagedBitCOSReader, PagedBitCOSSerializer
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LIB_PATH = str(REPO_ROOT / "libtrace_lm.so")
+PAGED_HEADER_SIZE = struct.calcsize("<IIHHfII")
+
+
+def _flip_ternary_payload_inplace(buf: bytearray, start: int, end: int) -> None:
+    """Invierte signos ternarios válidos (0 <-> 2), dejando 1 intacto y sin inyectar código 3."""
+    for idx in range(start, end):
+        b = buf[idx]
+        c0 = b & 3
+        c1 = (b >> 2) & 3
+        c2 = (b >> 4) & 3
+        c3 = (b >> 6) & 3
+        inv_c0 = (2 - c0) if c0 <= 2 else c0
+        inv_c1 = (2 - c1) if c1 <= 2 else c1
+        inv_c2 = (2 - c2) if c2 <= 2 else c2
+        inv_c3 = (2 - c3) if c3 <= 2 else c3
+        buf[idx] = inv_c0 | (inv_c1 << 2) | (inv_c2 << 4) | (inv_c3 << 6)
 
 
 def load_c_lib():
@@ -40,6 +60,9 @@ def load_c_lib():
 
     lib.trace_lm_free.argtypes = [ctypes.c_void_p]
     lib.trace_lm_free.restype = None
+
+    lib.trace_lm_get_config.argtypes = [ctypes.c_void_p]
+    lib.trace_lm_get_config.restype = ctypes.c_void_p
 
     lib.trace_lm_workspace_create.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.trace_lm_workspace_create.restype = ctypes.c_void_p
@@ -113,64 +136,76 @@ def test_strict_parity_2layer():
 
         c_model = lib.trace_lm_load(bin_path.encode())
         assert c_model is not None, "Fallo al cargar modelo en C"
-        c_ws = lib.trace_lm_workspace_create(c_model, 128)
-        assert c_ws is not None, "Fallo al crear workspace"
+        c_ws = None
+        c_kv_i8 = None
+        try:
+            c_cfg = lib.trace_lm_get_config(c_model)
+            assert c_cfg is not None, "trace_lm_get_config devolvió NULL"
+            c_ws = lib.trace_lm_workspace_create(c_cfg, 128)
+            assert c_ws is not None, "Fallo al crear workspace"
 
-        # 1. Modo INT8 KV
-        c_kv_i8 = lib.trace_lm_kv_create(c_model, 256, 1)
-        c_logits_i8 = (ctypes.c_float * (len(prompt) * vocab_size))()
-        c_tokens = (ctypes.c_int * len(prompt))(*prompt)
+            # 1. Modo INT8 KV
+            c_kv_i8 = lib.trace_lm_kv_create(c_cfg, 256, 1)
+            assert c_kv_i8 is not None, "Fallo al crear KV Cache INT8"
+            c_logits_i8 = (ctypes.c_float * (len(prompt) * vocab_size))()
+            c_tokens = (ctypes.c_int * len(prompt))(*prompt)
 
-        s_ret = lib.trace_lm_forward(c_model, c_kv_i8, c_tokens, len(prompt), c_logits_i8, 0, c_ws)
-        assert s_ret == len(prompt)
+            s_ret = lib.trace_lm_forward(c_model, c_kv_i8, c_tokens, len(prompt), c_logits_i8, 0, c_ws)
+            assert s_ret == len(prompt), f"trace_lm_forward devolvió {s_ret}"
 
-        arr_c_i8 = np.ctypeslib.as_array(c_logits_i8).reshape(len(prompt), vocab_size)
+            arr_c_i8 = np.ctypeslib.as_array(c_logits_i8).reshape(len(prompt), vocab_size)
 
-        with torch.no_grad():
-            py_logits_i8, _, _ = model(input_ids, use_weight_absorption=True, quantize_kv_int8=True)
-        arr_py_i8 = py_logits_i8.squeeze(0).numpy()
+            with torch.no_grad():
+                py_logits_i8, _, _ = model(
+                    input_ids, use_weight_absorption=True, quantize_kv_int8=True, add_sub_mode=True
+                )
+            arr_py_i8 = py_logits_i8.squeeze(0).numpy()
 
-        diff_n1 = float(np.max(np.abs(arr_c_i8 - arr_py_i8)))
-        toks_c_i8 = np.argmax(arr_c_i8, axis=-1)
-        toks_py_i8 = np.argmax(arr_py_i8, axis=-1)
-        greedy_match_n1 = float(np.mean(toks_c_i8 == toks_py_i8) * 100.0)
+            diff_n1 = float(np.max(np.abs(arr_c_i8 - arr_py_i8)))
+            toks_c_i8 = np.argmax(arr_c_i8, axis=-1)
+            toks_py_i8 = np.argmax(arr_py_i8, axis=-1)
+            greedy_match_n1 = float(np.mean(toks_c_i8 == toks_py_i8) * 100.0)
 
-        print(
-            f"✓ [2 Capas D=128] Nivel 1 (C INT8 vs PyTorch INT8): "
-            f"max_diff = {diff_n1:.6e} <= 1e-4, greedy_match = {greedy_match_n1:.1f}%"
-        )
-        assert diff_n1 <= 1e-4, f"Discrepancia Nivel 1 excede umbral: {diff_n1:.6e}"
-        assert greedy_match_n1 == 100.0, f"Greedy match Nivel 1 incompleto: {greedy_match_n1}%"
+            print(
+                f"✓ [2 Capas D=128] Nivel 1 (C INT8 vs PyTorch INT8): "
+                f"max_diff = {diff_n1:.6e} <= 1e-4, greedy_match = {greedy_match_n1:.1f}%"
+            )
+            assert diff_n1 <= 1e-4, f"Discrepancia Nivel 1 excede umbral: {diff_n1:.6e}"
+            assert greedy_match_n1 == 100.0, f"Greedy match Nivel 1 incompleto: {greedy_match_n1}%"
 
-        # 2. Modo FP32 KV
-        with torch.no_grad():
-            py_logits_fp32, _, _ = model(input_ids, use_weight_absorption=True, quantize_kv_int8=False)
-        arr_py_fp32 = py_logits_fp32.squeeze(0).numpy()
+            # 2. Modo FP32 KV
+            with torch.no_grad():
+                py_logits_fp32, _, _ = model(
+                    input_ids, use_weight_absorption=True, quantize_kv_int8=False, add_sub_mode=True
+                )
+            arr_py_fp32 = py_logits_fp32.squeeze(0).numpy()
 
-        targets = input_ids[:, 1:].contiguous()
-        loss_c_i8 = F.cross_entropy(torch.from_numpy(arr_c_i8[:-1]), targets[0]).item()
-        loss_py_fp32 = F.cross_entropy(torch.from_numpy(arr_py_fp32[:-1]), targets[0]).item()
+            targets = input_ids[:, 1:].contiguous()
+            loss_c_i8 = F.cross_entropy(torch.from_numpy(arr_c_i8[:-1]), targets[0]).item()
+            loss_py_fp32 = F.cross_entropy(torch.from_numpy(arr_py_fp32[:-1]), targets[0]).item()
 
-        ppl_c_i8 = math.exp(loss_c_i8)
-        ppl_py_fp32 = math.exp(loss_py_fp32)
-        delta_ppl = abs(ppl_c_i8 - ppl_py_fp32)
-        rel_delta_ppl_pct = (delta_ppl / ppl_py_fp32) * 100.0
+            ppl_c_i8 = math.exp(loss_c_i8)
+            ppl_py_fp32 = math.exp(loss_py_fp32)
+            delta_ppl = abs(ppl_c_i8 - ppl_py_fp32)
+            rel_delta_ppl_pct = (delta_ppl / ppl_py_fp32) * 100.0
 
-        toks_py_fp32 = np.argmax(arr_py_fp32, axis=-1)
-        greedy_match_n2 = float(np.mean(toks_c_i8 == toks_py_fp32) * 100.0)
+            toks_py_fp32 = np.argmax(arr_py_fp32, axis=-1)
+            greedy_match_n2 = float(np.mean(toks_c_i8 == toks_py_fp32) * 100.0)
 
-        print(
-            f"✓ [2 Capas D=128] Nivel 2 (C INT8 vs PyTorch FP32): PPL_C={ppl_c_i8:.2f}, "
-            f"PPL_Py={ppl_py_fp32:.2f}, delta_ppl={delta_ppl:.4f}, "
-            f"rel_delta_ppl={rel_delta_ppl_pct:.4f}%, greedy_match={greedy_match_n2:.1f}%"
-        )
-        assert abs(loss_c_i8 - loss_py_fp32) < 0.05
-        assert rel_delta_ppl_pct < 1.0
-        assert greedy_match_n2 >= 95.0
-
-        lib.trace_lm_kv_free(c_kv_i8)
-        lib.trace_lm_workspace_free(c_ws)
-        lib.trace_lm_free(c_model)
+            print(
+                f"✓ [2 Capas D=128] Nivel 2 (C INT8 vs PyTorch FP32): PPL_C={ppl_c_i8:.2f}, "
+                f"PPL_Py={ppl_py_fp32:.2f}, delta_ppl={delta_ppl:.4f}, "
+                f"rel_delta_ppl={rel_delta_ppl_pct:.4f}%, greedy_match={greedy_match_n2:.1f}%"
+            )
+            assert abs(loss_c_i8 - loss_py_fp32) < 0.05
+            assert rel_delta_ppl_pct < 1.0
+            assert greedy_match_n2 >= 95.0
+        finally:
+            if c_kv_i8 is not None:
+                lib.trace_lm_kv_free(c_kv_i8)
+            if c_ws is not None:
+                lib.trace_lm_workspace_free(c_ws)
+            lib.trace_lm_free(c_model)
 
 
 def test_scale_parity_preset_25m():
@@ -202,84 +237,99 @@ def test_scale_parity_preset_25m():
 
         c_model = lib.trace_lm_load(bin_path.encode())
         assert c_model is not None, "Fallo al cargar modelo 25M en C"
-        c_ws = lib.trace_lm_workspace_create(c_model, 128)
-        assert c_ws is not None, "Fallo al crear workspace"
+        c_ws = None
+        c_kv_i8 = None
+        c_kv_fp32 = None
+        try:
+            c_cfg = lib.trace_lm_get_config(c_model)
+            assert c_cfg is not None, "trace_lm_get_config devolvió NULL"
+            c_ws = lib.trace_lm_workspace_create(c_cfg, 128)
+            assert c_ws is not None, "Fallo al crear workspace"
 
-        # -------------------------------------------------------------
-        # 1. Auditoría Modo KV INT8 (12 capas reales)
-        # -------------------------------------------------------------
-        c_kv_i8 = lib.trace_lm_kv_create(c_model, 256, 1)
-        c_logits_i8 = (ctypes.c_float * (seq_len * vocab_size))()
-        c_tokens = (ctypes.c_int * seq_len)(*prompt)
+            # -------------------------------------------------------------
+            # 1. Auditoría Modo KV INT8 (12 capas reales)
+            # -------------------------------------------------------------
+            c_kv_i8 = lib.trace_lm_kv_create(c_cfg, 256, 1)
+            assert c_kv_i8 is not None, "Fallo al crear KV Cache INT8"
+            c_logits_i8 = (ctypes.c_float * (seq_len * vocab_size))()
+            c_tokens = (ctypes.c_int * seq_len)(*prompt)
 
-        lib.trace_lm_forward(c_model, c_kv_i8, c_tokens, seq_len, c_logits_i8, 0, c_ws)
-        arr_c_i8 = np.ctypeslib.as_array(c_logits_i8).reshape(seq_len, vocab_size)
+            s_ret_i8 = lib.trace_lm_forward(c_model, c_kv_i8, c_tokens, seq_len, c_logits_i8, 0, c_ws)
+            assert s_ret_i8 == seq_len, f"trace_lm_forward INT8 devolvió {s_ret_i8}"
+            arr_c_i8 = np.ctypeslib.as_array(c_logits_i8).reshape(seq_len, vocab_size)
 
-        with torch.no_grad():
-            py_logits_i8, _, _ = model(
-                input_ids, use_weight_absorption=True, quantize_kv_int8=True, add_sub_mode=True
+            with torch.no_grad():
+                py_logits_i8, _, _ = model(
+                    input_ids, use_weight_absorption=True, quantize_kv_int8=True, add_sub_mode=True
+                )
+            arr_py_i8 = py_logits_i8.squeeze(0).numpy()
+
+            diff_i8 = float(np.max(np.abs(arr_c_i8 - arr_py_i8)))
+            toks_c_i8 = np.argmax(arr_c_i8, axis=-1)
+            toks_py_i8 = np.argmax(arr_py_i8, axis=-1)
+            greedy_match_i8 = float(np.mean(toks_c_i8 == toks_py_i8) * 100.0)
+
+            loss_c_i8 = F.cross_entropy(torch.from_numpy(arr_c_i8[:-1]), targets[0]).item()
+            loss_py_i8 = F.cross_entropy(torch.from_numpy(arr_py_i8[:-1]), targets[0]).item()
+            ppl_c_i8 = math.exp(loss_c_i8)
+            ppl_py_i8 = math.exp(loss_py_i8)
+            delta_ppl_i8 = abs(ppl_c_i8 - ppl_py_i8)
+            rel_delta_ppl_i8 = (delta_ppl_i8 / ppl_py_i8) * 100.0
+
+            print(
+                f"✓ [12 Capas 25M] Modo KV INT8: max_diff = {diff_i8:.4f} (< 0.08 físico), "
+                f"greedy_match = {greedy_match_i8:.2f}% (>= 90%), "
+                f"Delta_PPL = {delta_ppl_i8:.2f} ({rel_delta_ppl_i8:.4f}%)"
             )
-        arr_py_i8 = py_logits_i8.squeeze(0).numpy()
+            assert diff_i8 < 0.08, f"max_diff excede umbral físico de redondeo en 12 capas: {diff_i8:.4f}"
+            assert greedy_match_i8 >= 90.0, f"Coincidencia greedy en 12 capas degradada: {greedy_match_i8}%"
+            assert rel_delta_ppl_i8 < 0.5, f"Delta PPL relativo excede 0.5%: {rel_delta_ppl_i8:.4f}%"
 
-        diff_i8 = float(np.max(np.abs(arr_c_i8 - arr_py_i8)))
-        toks_c_i8 = np.argmax(arr_c_i8, axis=-1)
-        toks_py_i8 = np.argmax(arr_py_i8, axis=-1)
-        greedy_match_i8 = float(np.mean(toks_c_i8 == toks_py_i8) * 100.0)
+            # -------------------------------------------------------------
+            # 2. Auditoría Modo KV FP32 (12 capas reales)
+            # -------------------------------------------------------------
+            c_kv_fp32 = lib.trace_lm_kv_create(c_cfg, 256, 0)
+            assert c_kv_fp32 is not None, "Fallo al crear KV Cache FP32"
+            c_logits_fp32 = (ctypes.c_float * (seq_len * vocab_size))()
 
-        loss_c_i8 = F.cross_entropy(torch.from_numpy(arr_c_i8[:-1]), targets[0]).item()
-        loss_py_i8 = F.cross_entropy(torch.from_numpy(arr_py_i8[:-1]), targets[0]).item()
-        ppl_c_i8 = math.exp(loss_c_i8)
-        ppl_py_i8 = math.exp(loss_py_i8)
-        delta_ppl_i8 = abs(ppl_c_i8 - ppl_py_i8)
-        rel_delta_ppl_i8 = (delta_ppl_i8 / ppl_py_i8) * 100.0
+            s_ret_fp32 = lib.trace_lm_forward(c_model, c_kv_fp32, c_tokens, seq_len, c_logits_fp32, 0, c_ws)
+            assert s_ret_fp32 == seq_len, f"trace_lm_forward FP32 devolvió {s_ret_fp32}"
+            arr_c_fp32 = np.ctypeslib.as_array(c_logits_fp32).reshape(seq_len, vocab_size)
 
-        print(
-            f"✓ [12 Capas 25M] Modo KV INT8: max_diff = {diff_i8:.4f} (< 0.08 físico), "
-            f"greedy_match = {greedy_match_i8:.2f}% (>= 90%), Delta_PPL = {delta_ppl_i8:.2f} ({rel_delta_ppl_i8:.4f}%)"
-        )
-        assert diff_i8 < 0.08, f"max_diff excede umbral físico de redondeo en 12 capas: {diff_i8:.4f}"
-        assert greedy_match_i8 >= 90.0, f"Coincidencia greedy en 12 capas degradada: {greedy_match_i8}%"
-        assert rel_delta_ppl_i8 < 0.5, f"Delta PPL relativo excede 0.5%: {rel_delta_ppl_i8:.4f}%"
+            with torch.no_grad():
+                py_logits_fp32, _, _ = model(
+                    input_ids, use_weight_absorption=True, quantize_kv_int8=False, add_sub_mode=True
+                )
+            arr_py_fp32 = py_logits_fp32.squeeze(0).numpy()
 
-        # -------------------------------------------------------------
-        # 2. Auditoría Modo KV FP32 (12 capas reales)
-        # -------------------------------------------------------------
-        c_kv_fp32 = lib.trace_lm_kv_create(c_model, 256, 0)
-        c_logits_fp32 = (ctypes.c_float * (seq_len * vocab_size))()
+            diff_fp32 = float(np.max(np.abs(arr_c_fp32 - arr_py_fp32)))
+            toks_c_fp32 = np.argmax(arr_c_fp32, axis=-1)
+            toks_py_fp32 = np.argmax(arr_py_fp32, axis=-1)
+            greedy_match_fp32 = float(np.mean(toks_c_fp32 == toks_py_fp32) * 100.0)
 
-        lib.trace_lm_forward(c_model, c_kv_fp32, c_tokens, seq_len, c_logits_fp32, 0, c_ws)
-        arr_c_fp32 = np.ctypeslib.as_array(c_logits_fp32).reshape(seq_len, vocab_size)
+            loss_c_fp32 = F.cross_entropy(torch.from_numpy(arr_c_fp32[:-1]), targets[0]).item()
+            loss_py_fp32 = F.cross_entropy(torch.from_numpy(arr_py_fp32[:-1]), targets[0]).item()
+            ppl_c_fp32 = math.exp(loss_c_fp32)
+            ppl_py_fp32 = math.exp(loss_py_fp32)
+            delta_ppl_fp32 = abs(ppl_c_fp32 - ppl_py_fp32)
+            rel_delta_ppl_fp32 = (delta_ppl_fp32 / ppl_py_fp32) * 100.0
 
-        with torch.no_grad():
-            py_logits_fp32, _, _ = model(
-                input_ids, use_weight_absorption=True, quantize_kv_int8=False, add_sub_mode=True
+            print(
+                f"✓ [12 Capas 25M] Modo KV FP32: max_diff = {diff_fp32:.4f} (< 0.05 físico), "
+                f"greedy_match = {greedy_match_fp32:.2f}% (>= 95%), "
+                f"Delta_PPL = {delta_ppl_fp32:.2f} ({rel_delta_ppl_fp32:.4f}%)"
             )
-        arr_py_fp32 = py_logits_fp32.squeeze(0).numpy()
-
-        diff_fp32 = float(np.max(np.abs(arr_c_fp32 - arr_py_fp32)))
-        toks_c_fp32 = np.argmax(arr_c_fp32, axis=-1)
-        toks_py_fp32 = np.argmax(arr_py_fp32, axis=-1)
-        greedy_match_fp32 = float(np.mean(toks_c_fp32 == toks_py_fp32) * 100.0)
-
-        loss_c_fp32 = F.cross_entropy(torch.from_numpy(arr_c_fp32[:-1]), targets[0]).item()
-        loss_py_fp32 = F.cross_entropy(torch.from_numpy(arr_py_fp32[:-1]), targets[0]).item()
-        ppl_c_fp32 = math.exp(loss_c_fp32)
-        ppl_py_fp32 = math.exp(loss_py_fp32)
-        delta_ppl_fp32 = abs(ppl_c_fp32 - ppl_py_fp32)
-        rel_delta_ppl_fp32 = (delta_ppl_fp32 / ppl_py_fp32) * 100.0
-
-        print(
-            f"✓ [12 Capas 25M] Modo KV FP32: max_diff = {diff_fp32:.4f} (< 0.05 físico), "
-            f"greedy_match = {greedy_match_fp32:.2f}% (>= 95%), Delta_PPL = {delta_ppl_fp32:.2f} ({rel_delta_ppl_fp32:.4f}%)"
-        )
-        assert diff_fp32 < 0.05, f"max_diff excede umbral físico de redondeo en 12 capas FP32: {diff_fp32:.4f}"
-        assert greedy_match_fp32 >= 95.0, f"Coincidencia greedy en 12 capas FP32 degradada: {greedy_match_fp32}%"
-        assert rel_delta_ppl_fp32 < 0.5, f"Delta PPL relativo excede 0.5%: {rel_delta_ppl_fp32:.4f}%"
-
-        lib.trace_lm_kv_free(c_kv_i8)
-        lib.trace_lm_kv_free(c_kv_fp32)
-        lib.trace_lm_workspace_free(c_ws)
-        lib.trace_lm_free(c_model)
+            assert diff_fp32 < 0.05, f"max_diff excede umbral físico de redondeo en 12 capas FP32: {diff_fp32:.4f}"
+            assert greedy_match_fp32 >= 95.0, f"Coincidencia greedy en 12 capas FP32 degradada: {greedy_match_fp32}%"
+            assert rel_delta_ppl_fp32 < 0.5, f"Delta PPL relativo excede 0.5%: {rel_delta_ppl_fp32:.4f}%"
+        finally:
+            if c_kv_i8 is not None:
+                lib.trace_lm_kv_free(c_kv_i8)
+            if c_kv_fp32 is not None:
+                lib.trace_lm_kv_free(c_kv_fp32)
+            if c_ws is not None:
+                lib.trace_lm_workspace_free(c_ws)
+            lib.trace_lm_free(c_model)
 
 
 def test_falsification_battery():
@@ -305,6 +355,7 @@ def test_falsification_battery():
 
     prompt = [15, 42, 88, 120, 200, 50, 12, 99, 101, 202, 303, 404, 505, 606, 707, 808]
     vocab_size = cfg.vocab_size
+    c_tokens = (ctypes.c_int * len(prompt))(*prompt)
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         canonical_bin = os.path.join(tmp_dir, "canonical.bin")
@@ -312,129 +363,173 @@ def test_falsification_battery():
 
         # 0. Línea base canónica en C
         c_model_sano = lib.trace_lm_load(canonical_bin.encode())
-        c_ws_sano = lib.trace_lm_workspace_create(c_model_sano, 128)
-        c_kv_sano = lib.trace_lm_kv_create(c_model_sano, 256, 1)
+        assert c_model_sano is not None
+        c_ws_sano = None
+        c_kv_sano = None
+        try:
+            c_cfg_sano = lib.trace_lm_get_config(c_model_sano)
+            assert c_cfg_sano is not None
+            c_ws_sano = lib.trace_lm_workspace_create(c_cfg_sano, 128)
+            c_kv_sano = lib.trace_lm_kv_create(c_cfg_sano, 256, 1)
+            assert c_ws_sano is not None and c_kv_sano is not None
 
-        c_tokens = (ctypes.c_int * len(prompt))(*prompt)
-        logits_sano = (ctypes.c_float * (len(prompt) * vocab_size))()
-        lib.trace_lm_forward(c_model_sano, c_kv_sano, c_tokens, len(prompt), logits_sano, 0, c_ws_sano)
-        arr_sano = np.ctypeslib.as_array(logits_sano).copy()
-
-        lib.trace_lm_kv_free(c_kv_sano)
-        lib.trace_lm_workspace_free(c_ws_sano)
-        lib.trace_lm_free(c_model_sano)
+            logits_sano = (ctypes.c_float * (len(prompt) * vocab_size))()
+            s_sano = lib.trace_lm_forward(c_model_sano, c_kv_sano, c_tokens, len(prompt), logits_sano, 0, c_ws_sano)
+            assert s_sano == len(prompt), f"Línea base devolvió {s_sano}"
+            arr_sano = np.ctypeslib.as_array(logits_sano).copy()
+        finally:
+            if c_kv_sano is not None:
+                lib.trace_lm_kv_free(c_kv_sano)
+            if c_ws_sano is not None:
+                lib.trace_lm_workspace_free(c_ws_sano)
+            lib.trace_lm_free(c_model_sano)
 
         # Leer bytes canónicos y metadatos de páginas
         with open(canonical_bin, "rb") as f:
             canonical_bytes = bytearray(f.read())
+
         reader = PagedBitCOSReader(canonical_bin)
-        pgs_offset = reader.pages_offset
-        page_size = reader.page_size
+        try:
+            pgs_offset = reader.pages_offset
+            page_size = reader.page_size
+            wdkv_page_id = reader.tensors_map["layers.0.attn.w_dkv"]["page_ids"][0]
+            wkr_page_id = reader.tensors_map["layers.0.attn.w_kr"]["page_ids"][0]
+        finally:
+            reader.close()
 
         # -------------------------------------------------------------
-        # Falsación 1: Corrupción de páginas de W_dkv (cuello de botella c_kv)
+        # Falsación 1: Inversión ternaria válida (0 <-> 2) en W_dkv
         # -------------------------------------------------------------
         f1_bytes = bytearray(canonical_bytes)
-        wdkv_page_id = reader.tensors_map["layers.0.attn.w_dkv"]["page_ids"][0]
         page_start = pgs_offset + wdkv_page_id * page_size
-        for idx in range(page_start + 64, page_start + page_size):
-            f1_bytes[idx] ^= 0xAA
+        _flip_ternary_payload_inplace(f1_bytes, page_start + PAGED_HEADER_SIZE, page_start + page_size)
 
         f1_bin = os.path.join(tmp_dir, "falsified_1_wdkv.bin")
         with open(f1_bin, "wb") as f:
             f.write(f1_bytes)
 
         m1 = lib.trace_lm_load(f1_bin.encode())
-        ws1 = lib.trace_lm_workspace_create(m1, 128)
-        kv1 = lib.trace_lm_kv_create(m1, 256, 1)
-        logits_f1 = (ctypes.c_float * (len(prompt) * vocab_size))()
+        assert m1 is not None
+        ws1 = None
+        kv1 = None
+        try:
+            cfg1 = lib.trace_lm_get_config(m1)
+            assert cfg1 is not None
+            ws1 = lib.trace_lm_workspace_create(cfg1, 128)
+            kv1 = lib.trace_lm_kv_create(cfg1, 256, 1)
+            assert ws1 is not None and kv1 is not None
+            logits_f1 = (ctypes.c_float * (len(prompt) * vocab_size))()
 
-        lib.trace_lm_forward(m1, kv1, c_tokens, len(prompt), logits_f1, 0, ws1)
-        arr_f1 = np.ctypeslib.as_array(logits_f1)
-        diff_f1 = float(np.max(np.abs(arr_f1 - arr_sano)))
+            s_f1 = lib.trace_lm_forward(m1, kv1, c_tokens, len(prompt), logits_f1, 0, ws1)
+            assert s_f1 == len(prompt), f"Falsación 1 devolvió {s_f1}"
+            arr_f1 = np.ctypeslib.as_array(logits_f1)
+            diff_f1 = float(np.max(np.abs(arr_f1 - arr_sano)))
 
-        print(f"✓ Falsación 1 (Corrupción W_dkv): Delta_logits = {diff_f1:.4f} > 0.1")
-        assert diff_f1 > 0.1, f"Falsación 1 falló: logits no degradaron suficientemente ({diff_f1:.4f})"
-
-        lib.trace_lm_kv_free(kv1)
-        lib.trace_lm_workspace_free(ws1)
-        lib.trace_lm_free(m1)
+            print(f"✓ Falsación 1 (Inversión ternaria W_dkv): Delta_logits = {diff_f1:.4f} > 0.1")
+            assert diff_f1 > 0.1, f"Falsación 1 falló: logits no degradaron suficientemente ({diff_f1:.4f})"
+        finally:
+            if kv1 is not None:
+                lib.trace_lm_kv_free(kv1)
+            if ws1 is not None:
+                lib.trace_lm_workspace_free(ws1)
+            lib.trace_lm_free(m1)
 
         # -------------------------------------------------------------
-        # Falsación 2: Corrupción de páginas de W_kr (vector desacoplado RoPE)
+        # Falsación 2: Inversión ternaria válida (0 <-> 2) en W_kr (RoPE)
         # -------------------------------------------------------------
         f2_bytes = bytearray(canonical_bytes)
-        wkr_page_id = reader.tensors_map["layers.0.attn.w_kr"]["page_ids"][0]
         page_start_kr = pgs_offset + wkr_page_id * page_size
-        for idx in range(page_start_kr + 64, page_start_kr + page_size):
-            f2_bytes[idx] ^= 0x55
+        _flip_ternary_payload_inplace(f2_bytes, page_start_kr + PAGED_HEADER_SIZE, page_start_kr + page_size)
 
         f2_bin = os.path.join(tmp_dir, "falsified_2_wkr.bin")
         with open(f2_bin, "wb") as f:
             f.write(f2_bytes)
 
         m2 = lib.trace_lm_load(f2_bin.encode())
-        ws2 = lib.trace_lm_workspace_create(m2, 128)
-        kv2 = lib.trace_lm_kv_create(m2, 256, 1)
-        logits_f2 = (ctypes.c_float * (len(prompt) * vocab_size))()
+        assert m2 is not None
+        ws2 = None
+        kv2 = None
+        try:
+            cfg2 = lib.trace_lm_get_config(m2)
+            assert cfg2 is not None
+            ws2 = lib.trace_lm_workspace_create(cfg2, 128)
+            kv2 = lib.trace_lm_kv_create(cfg2, 256, 1)
+            assert ws2 is not None and kv2 is not None
+            logits_f2 = (ctypes.c_float * (len(prompt) * vocab_size))()
 
-        lib.trace_lm_forward(m2, kv2, c_tokens, len(prompt), logits_f2, 0, ws2)
-        arr_f2 = np.ctypeslib.as_array(logits_f2)
-        diff_f2 = float(np.max(np.abs(arr_f2 - arr_sano)))
+            s_f2 = lib.trace_lm_forward(m2, kv2, c_tokens, len(prompt), logits_f2, 0, ws2)
+            assert s_f2 == len(prompt), f"Falsación 2 devolvió {s_f2}"
+            arr_f2 = np.ctypeslib.as_array(logits_f2)
+            diff_f2 = float(np.max(np.abs(arr_f2 - arr_sano)))
 
-        print(f"✓ Falsación 2 (Corrupción W_kr RoPE): Delta_logits = {diff_f2:.4f} > 0.1")
-        assert diff_f2 > 0.1, f"Falsación 2 falló: logits no degradaron suficientemente ({diff_f2:.4f})"
-
-        lib.trace_lm_kv_free(kv2)
-        lib.trace_lm_workspace_free(ws2)
-        lib.trace_lm_free(m2)
-        reader.close()
+            print(f"✓ Falsación 2 (Inversión ternaria W_kr RoPE): Delta_logits = {diff_f2:.4f} > 0.1")
+            assert diff_f2 > 0.1, f"Falsación 2 falló: logits no degradaron suficientemente ({diff_f2:.4f})"
+        finally:
+            if kv2 is not None:
+                lib.trace_lm_kv_free(kv2)
+            if ws2 is not None:
+                lib.trace_lm_workspace_free(ws2)
+            lib.trace_lm_free(m2)
 
         # -------------------------------------------------------------
         # Falsación 3: Modificación de 1 token en Prefix Caching
         # -------------------------------------------------------------
         m3 = lib.trace_lm_load(canonical_bin.encode())
-        ws3 = lib.trace_lm_workspace_create(m3, 128)
-        kv3 = lib.trace_lm_kv_create(m3, 256, 1)
+        assert m3 is not None
+        ws3 = None
+        kv3 = None
+        kv3_clean = None
+        try:
+            cfg3 = lib.trace_lm_get_config(m3)
+            assert cfg3 is not None
+            ws3 = lib.trace_lm_workspace_create(cfg3, 128)
+            kv3 = lib.trace_lm_kv_create(cfg3, 256, 1)
+            assert ws3 is not None and kv3 is not None
 
-        prompt_a = list(prompt)
-        c_tokens_a = (ctypes.c_int * len(prompt_a))(*prompt_a)
-        logits_a = (ctypes.c_float * vocab_size)()
-        lib.trace_lm_forward(m3, kv3, c_tokens_a, len(prompt_a), logits_a, 1, ws3)
-        arr_a = np.ctypeslib.as_array(logits_a).copy()
+            prompt_a = list(prompt)
+            c_tokens_a = (ctypes.c_int * len(prompt_a))(*prompt_a)
+            logits_a = (ctypes.c_float * vocab_size)()
+            s_a = lib.trace_lm_forward(m3, kv3, c_tokens_a, len(prompt_a), logits_a, 1, ws3)
+            assert s_a == len(prompt_a), f"Falsación 3 prompt A devolvió {s_a}"
+            arr_a = np.ctypeslib.as_array(logits_a).copy()
 
-        prompt_b = list(prompt_a)
-        prompt_b[10] = (prompt_b[10] + 777) % vocab_size
-        c_tokens_b = (ctypes.c_int * len(prompt_b))(*prompt_b)
-        logits_b_cached = (ctypes.c_float * vocab_size)()
+            prompt_b = list(prompt_a)
+            prompt_b[10] = (prompt_b[10] + 777) % vocab_size
+            c_tokens_b = (ctypes.c_int * len(prompt_b))(*prompt_b)
+            logits_b_cached = (ctypes.c_float * vocab_size)()
 
-        s_proc = lib.trace_lm_forward(m3, kv3, c_tokens_b, len(prompt_b), logits_b_cached, 1, ws3)
-        common_pfx = lib.trace_lm_kv_get_last_common_prefix(kv3)
+            s_proc = lib.trace_lm_forward(m3, kv3, c_tokens_b, len(prompt_b), logits_b_cached, 1, ws3)
+            common_pfx = lib.trace_lm_kv_get_last_common_prefix(kv3)
 
-        assert common_pfx == 10, f"Prefix caching reutilizó más allá del token modificado: {common_pfx} != 10"
-        assert s_proc == len(prompt_b) - 10, f"Debe reprocesar tokens divergentes: {s_proc}"
+            assert common_pfx == 10, f"Prefix caching reutilizó más allá del token modificado: {common_pfx} != 10"
+            assert s_proc == len(prompt_b) - 10, f"Debe reprocesar tokens divergentes: {s_proc}"
 
-        arr_b_cached = np.ctypeslib.as_array(logits_b_cached)
-        diff_divergence = float(np.max(np.abs(arr_b_cached - arr_a)))
-        print(
-            f"✓ Falsación 3 (Prefijo invalidado en t=10): common_pfx = {common_pfx}, "
-            f"S_reprocesado = {s_proc}, Delta_logits = {diff_divergence:.4f} > 0.1"
-        )
-        assert diff_divergence > 0.1, f"Logits no divergieron tras mutar prefijo: {diff_divergence:.4f}"
+            arr_b_cached = np.ctypeslib.as_array(logits_b_cached)
+            diff_divergence = float(np.max(np.abs(arr_b_cached - arr_a)))
+            print(
+                f"✓ Falsación 3 (Prefijo invalidado en t=10): common_pfx = {common_pfx}, "
+                f"S_reprocesado = {s_proc}, Delta_logits = {diff_divergence:.4f} > 0.1"
+            )
+            assert diff_divergence > 0.1, f"Logits no divergieron tras mutar prefijo: {diff_divergence:.4f}"
 
-        kv3_clean = lib.trace_lm_kv_create(m3, 256, 1)
-        logits_b_clean = (ctypes.c_float * vocab_size)()
-        lib.trace_lm_forward(m3, kv3_clean, c_tokens_b, len(prompt_b), logits_b_clean, 1, ws3)
-        arr_b_clean = np.ctypeslib.as_array(logits_b_clean)
+            kv3_clean = lib.trace_lm_kv_create(cfg3, 256, 1)
+            assert kv3_clean is not None
+            logits_b_clean = (ctypes.c_float * vocab_size)()
+            s_clean = lib.trace_lm_forward(m3, kv3_clean, c_tokens_b, len(prompt_b), logits_b_clean, 1, ws3)
+            assert s_clean == len(prompt_b), f"Falsación 3 limpio devolvió {s_clean}"
+            arr_b_clean = np.ctypeslib.as_array(logits_b_clean)
 
-        diff_clean = float(np.max(np.abs(arr_b_cached - arr_b_clean)))
-        assert diff_clean == 0.0 or diff_clean < 1e-5, f"Discrepancia entre prefijo invalidado y limpio: {diff_clean}"
-        print(f"✓ Cero reutilización indebida certificada: paridad bit a bit exacta (diff = {diff_clean:.6e})")
-
-        lib.trace_lm_kv_free(kv3)
-        lib.trace_lm_kv_free(kv3_clean)
-        lib.trace_lm_workspace_free(ws3)
-        lib.trace_lm_free(m3)
+            diff_clean = float(np.max(np.abs(arr_b_cached - arr_b_clean)))
+            assert diff_clean < 1e-5, f"Discrepancia entre prefijo invalidado y limpio: {diff_clean}"
+            print(f"✓ Cero reutilización indebida certificada: paridad numérica (diff = {diff_clean:.6e} < 1e-5)")
+        finally:
+            if kv3 is not None:
+                lib.trace_lm_kv_free(kv3)
+            if kv3_clean is not None:
+                lib.trace_lm_kv_free(kv3_clean)
+            if ws3 is not None:
+                lib.trace_lm_workspace_free(ws3)
+            lib.trace_lm_free(m3)
 
 
 if __name__ == "__main__":

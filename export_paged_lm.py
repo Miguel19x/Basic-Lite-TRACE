@@ -17,7 +17,12 @@ Audita y certifica:
 
 import argparse
 import hashlib
+import math
 import os
+from typing import Any
+
+import torch
+
 from trace.lm.config import TRACELMConfig
 from trace.lm.model import TRACELanguageModel
 from trace.serialization.paged_bitcos import (
@@ -25,9 +30,6 @@ from trace.serialization.paged_bitcos import (
     PagedBitCOSSerializer,
     count_fp32_weights_in_bitlinear,
 )
-from typing import Any
-
-import torch
 
 
 def compute_sha256(filepath: str) -> str:
@@ -46,6 +48,9 @@ def export_lm_checkpoint(
     page_size: int = 4096,
     validate_load: bool = True,
 ) -> dict[str, Any]:
+    if page_size < 4096 or page_size % 4096 != 0:
+        raise ValueError(f"page_size debe ser múltiplo positivo de 4096 bytes, recibido: {page_size}")
+
     torch.set_num_threads(2)
 
     print("=" * 80)
@@ -60,7 +65,11 @@ def export_lm_checkpoint(
     if checkpoint_path is not None:
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint no encontrado: {checkpoint_path}")
-        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if hasattr(torch.serialization, "safe_globals"):
+            with torch.serialization.safe_globals([TRACELMConfig]):
+                ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        else:
+            ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         if "cfg" in ckpt:
             cfg = TRACELMConfig(**ckpt["cfg"]) if isinstance(ckpt["cfg"], dict) else ckpt["cfg"]
         else:
@@ -118,45 +127,46 @@ def export_lm_checkpoint(
     if validate_load:
         print("\n--- AUDITORÍA DE MEMORIA Y RECARGA (PUERTA DE SALIDA HITO 3.3) ---")
         reader = PagedBitCOSReader(output_path)
-        breakdown = reader.get_accounting_breakdown()
-        print(f"  Parámetros residentes FP32:             {breakdown['resident_fp32_params_count']} ({breakdown['resident_fp32_params_bytes'] / 1024:.2f} KB)")
-        print(f"  Páginas ternarias empaquetadas (2-bit): {breakdown['ternary_pages_count']} ({breakdown['ternary_pages_bytes'] / 1024:.2f} KB)")
+        try:
+            breakdown = reader.get_accounting_breakdown()
+            print(f"  Parámetros residentes FP32:             {breakdown['resident_fp32_params_count']} ({breakdown['resident_fp32_params_bytes'] / 1024:.2f} KB)")
+            print(f"  Páginas ternarias empaquetadas (2-bit): {breakdown['ternary_pages_count']} ({breakdown['ternary_pages_bytes'] / 1024:.2f} KB)")
 
-        fresh_model = TRACELanguageModel(cfg)
-        loaded = reader.load_into_model(fresh_model)
-        fresh_model.eval()
+            fresh_model = TRACELanguageModel(cfg)
+            loaded = reader.load_into_model(fresh_model)
+            fresh_model.eval()
 
-        # Comprobación 0 pesos FP32 en BitLinear
-        fp32_count = count_fp32_weights_in_bitlinear(fresh_model)
-        print(f"  Módulos recargados desde binario:       {loaded}")
-        print(f"  Tensores FP32 en matrices BitLinear:    {fp32_count} elementos")
-        if fp32_count != 0:
+            # Comprobación 0 pesos FP32 en BitLinear
+            fp32_count = count_fp32_weights_in_bitlinear(fresh_model)
+            print(f"  Módulos recargados desde binario:       {loaded}")
+            print(f"  Tensores FP32 en matrices BitLinear:    {fp32_count} elementos")
+            if fp32_count != 0:
+                raise AssertionError(f"Violación de invariante: {fp32_count} pesos FP32 detectados en RAM.")
+
+            # Comprobación tied embeddings
+            if fresh_model.lm_head.weight is not fresh_model.tok_emb.weight:
+                raise AssertionError("Violación de tied embeddings: lm_head.weight no es el mismo objeto que tok_emb.weight.")
+            print("  [OK] Tied embeddings preservados (lm_head.weight is tok_emb.weight)")
+
+            # Comprobación de alineación de páginas y múltiplos de 4096
+            if reader.pages_offset % page_size != 0:
+                raise AssertionError(f"Alineación física violada: pages_offset={reader.pages_offset} no es múltiplo de {page_size}")
+            if reader.total_pages * page_size != (reader.total_size - reader.pages_offset):
+                raise AssertionError("Violación de integridad de páginas: el tamaño del segmento de páginas no coincide con total_pages * page_size")
+            print(f"  [OK] Alineación física validada: offset={reader.pages_offset} alineado a {page_size}B, 0 desperdicio.")
+
+            # Paridad funcional
+            dummy_x = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
+            with torch.no_grad():
+                y_orig, _, _ = model(dummy_x)
+                y_load, _, _ = fresh_model(dummy_x)
+                diff = torch.max(torch.abs(y_orig - y_load)).item()
+            assert math.isfinite(diff) and diff <= 1e-3, (
+                f"Paridad numérica fallida tras recarga Paged BitCOS: max_diff={diff:.6e}"
+            )
+            print(f"  [OK] Paridad numérica forward pass: max_diff = {diff:.6e}")
+        finally:
             reader.close()
-            raise AssertionError(f"Violación de invariante: {fp32_count} pesos FP32 detectados en RAM.")
-
-        # Comprobación tied embeddings
-        if fresh_model.lm_head.weight is not fresh_model.tok_emb.weight:
-            reader.close()
-            raise AssertionError("Violación de tied embeddings: lm_head.weight no es el mismo objeto que tok_emb.weight.")
-        print("  [OK] Tied embeddings preservados (lm_head.weight is tok_emb.weight)")
-
-        # Comprobación de alineación de páginas y múltiplos de 4096
-        if reader.pages_offset % page_size != 0:
-            reader.close()
-            raise AssertionError(f"Alineación física violada: pages_offset={reader.pages_offset} no es múltiplo de {page_size}")
-        if reader.total_pages * page_size != (reader.total_size - reader.pages_offset):
-            reader.close()
-            raise AssertionError("Violación de integridad de páginas: el tamaño del segmento de páginas no coincide con total_pages * page_size")
-        print(f"  [OK] Alineación física validada: offset={reader.pages_offset} alineado a {page_size}B, 0 desperdicio.")
-
-        # Paridad funcional
-        dummy_x = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
-        with torch.no_grad():
-            y_orig, _, _ = model(dummy_x)
-            y_load, _, _ = fresh_model(dummy_x)
-            diff = torch.max(torch.abs(y_orig - y_load)).item()
-        print(f"  [OK] Paridad numérica forward pass: max_diff = {diff:.6e}")
-        reader.close()
 
     print("\n" + "=" * 80)
     print("Exportación Paged BitCOS v1.1 finalizada con éxito.")

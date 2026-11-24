@@ -5,12 +5,12 @@
 # SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 import time
-from trace.models.causal import TRACECausalModel
 from typing import Any
 
 import torch
 
 from data import ProceduralCompositionalDataset, parse_fixed_scratchpad
+from trace.models.causal import TRACECausalModel
 
 
 def compute_ece(confidences: list[float], correctness: list[float], num_bins: int = 10) -> float:
@@ -31,6 +31,7 @@ def compute_ece(confidences: list[float], correctness: list[float], num_bins: in
     return ece * 100.0
 
 
+@torch.no_grad()
 def evaluate_causal(
     model: TRACECausalModel,
     dataset: ProceduralCompositionalDataset,
@@ -41,86 +42,90 @@ def evaluate_causal(
     Calcula Exact Match Total, Scratchpad EM, Final EM, Exactitud de Dígitos,
     Validez de Formato, Latencia y Calibración ECE (Global y Etapa 2).
     """
+    was_training = model.training
     model.eval()
-    total_cases = len(dataset)
-    em_total_count = 0
-    sp_em_count = 0
-    final_em_count = 0
-    fmt_valid_count = 0
+    try:
+        total_cases = len(dataset)
+        em_total_count = 0
+        sp_em_count = 0
+        final_em_count = 0
+        fmt_valid_count = 0
 
-    total_digits = 0
-    matching_digits = 0
-    total_time_ms = 0.0
+        total_digits = 0
+        matching_digits = 0
+        total_time_ms = 0.0
 
-    all_confidences: list[float] = []
-    all_correctness: list[float] = []
-    s2_confidences: list[float] = []
-    s2_correctness: list[float] = []
+        all_confidences: list[float] = []
+        all_correctness: list[float] = []
+        s2_confidences: list[float] = []
+        s2_correctness: list[float] = []
 
-    samples = dataset.samples
+        samples = dataset.samples
 
-    for idx in range(total_cases):
-        prompt_b, target_b, expected_watt, expected_ms = samples[idx]
-        sub_w, sub_ms, _, _ = dataset.record_meta.get(
-            (prompt_b, target_b), (None, None, expected_watt, expected_ms)
-        )
+        for idx in range(total_cases):
+            prompt_b, target_b, expected_watt, expected_ms = samples[idx]
+            sub_w, sub_ms, _, _ = dataset.record_meta.get(
+                (prompt_b, target_b), (None, None, expected_watt, expected_ms)
+            )
 
-        t0 = time.perf_counter()
-        gen_str, meta = model.generate_causal_two_step(prompt_b)
-        t1 = time.perf_counter()
-        total_time_ms += (t1 - t0) * 1000.0
+            t0 = time.perf_counter()
+            gen_str, meta = model.generate_causal_two_step(prompt_b)
+            t1 = time.perf_counter()
+            total_time_ms += (t1 - t0) * 1000.0
 
-        valid, pred_pw, pred_pms, pred_watt, pred_ms = parse_fixed_scratchpad(gen_str)
+            valid, pred_pw, pred_pms, pred_watt, pred_ms = parse_fixed_scratchpad(gen_str)
 
-        if valid:
-            fmt_valid_count += 1
+            if valid:
+                fmt_valid_count += 1
 
-            # Comparación de Subtotales (Etapa 1)
-            sp_match = (pred_pw == sub_w) and (pred_pms == sub_ms)
-            if sp_match:
-                sp_em_count += 1
+                # Comparación de Subtotales (Etapa 1)
+                sp_match = (pred_pw == sub_w) and (pred_pms == sub_ms)
+                if sp_match:
+                    sp_em_count += 1
 
-            # Comparación de Totales Finales (Etapa 2)
-            fn_match = (pred_watt == expected_watt) and (pred_ms == expected_ms)
-            if fn_match:
-                final_em_count += 1
+                # Comparación de Totales Finales (Etapa 2)
+                fn_match = (pred_watt == expected_watt) and (pred_ms == expected_ms)
+                if fn_match:
+                    final_em_count += 1
 
-            # Exact Match Total
-            if sp_match and fn_match:
-                em_total_count += 1
+                # Exact Match Total
+                if sp_match and fn_match:
+                    em_total_count += 1
 
-        # Comparación granular de dígitos
-        expected_target_str = target_b.decode("utf-8")
-        # Ambos deben tener los 12 dígitos en sus posiciones
-        # Target: pw: XXX\npms: YYY\nwatt: ZZZ\nms: WWW\n
-        digit_indices = [
-            (4, 7),   # pw (dígitos 0, 1, 2)
-            (13, 16), # pms (dígitos 3, 4, 5)
-            (23, 26), # watt (dígitos 6, 7, 8 - Etapa 2)
-            (31, 34), # ms (dígitos 9, 10, 11 - Etapa 2)
-        ]
+            # Comparación granular de dígitos
+            expected_target_str = target_b.decode("utf-8")
+            # Ambos deben tener los 12 dígitos en sus posiciones
+            # Target: pw: XXX\npms: YYY\nwatt: ZZZ\nms: WWW\n
+            digit_indices = [
+                (4, 7),   # pw (dígitos 0, 1, 2)
+                (13, 16), # pms (dígitos 3, 4, 5)
+                (23, 26), # watt (dígitos 6, 7, 8 - Etapa 2)
+                (31, 34), # ms (dígitos 9, 10, 11 - Etapa 2)
+            ]
 
-        case_correctness: list[float] = []
-        for s_start, s_end in digit_indices:
-            exp_sub = expected_target_str[s_start:s_end]
-            pred_sub = gen_str[s_start:s_end] if len(gen_str) >= s_end else "???"
-            for e_char, p_char in zip(exp_sub, pred_sub):
-                total_digits += 1
-                is_match = 1.0 if e_char == p_char else 0.0
-                if e_char == p_char:
-                    matching_digits += 1
-                case_correctness.append(is_match)
+            case_correctness: list[float] = []
+            for s_start, s_end in digit_indices:
+                exp_sub = expected_target_str[s_start:s_end]
+                pred_sub = gen_str[s_start:s_end] if len(gen_str) >= s_end else "???"
+                for e_char, p_char in zip(exp_sub, pred_sub):
+                    total_digits += 1
+                    is_match = 1.0 if e_char == p_char else 0.0
+                    if e_char == p_char:
+                        matching_digits += 1
+                    case_correctness.append(is_match)
 
-        if "digit_confidences" in meta and len(meta["digit_confidences"]) == 12 and len(case_correctness) == 12:
-            all_confidences.extend(meta["digit_confidences"])
-            all_correctness.extend(case_correctness)
-            s2_confidences.extend(meta["digit_confidences"][6:12])
-            s2_correctness.extend(case_correctness[6:12])
+            if "digit_confidences" in meta and len(meta["digit_confidences"]) == 12 and len(case_correctness) == 12:
+                all_confidences.extend(meta["digit_confidences"])
+                all_correctness.extend(case_correctness)
+                s2_confidences.extend(meta["digit_confidences"][6:12])
+                s2_correctness.extend(case_correctness[6:12])
+    finally:
+        model.train(was_training)
 
-    em_pct = (em_total_count / total_cases) * 100.0
-    sp_em_pct = (sp_em_count / total_cases) * 100.0
-    final_em_pct = (final_em_count / total_cases) * 100.0
-    fmt_valid_pct = (fmt_valid_count / total_cases) * 100.0
+    em_pct = (em_total_count / total_cases) * 100.0 if total_cases > 0 else 0.0
+    sp_em_pct = (sp_em_count / total_cases) * 100.0 if total_cases > 0 else 0.0
+    final_em_pct = (final_em_count / total_cases) * 100.0 if total_cases > 0 else 0.0
+    fmt_valid_pct = (fmt_valid_count / total_cases) * 100.0 if total_cases > 0 else 0.0
     digit_acc_pct = (matching_digits / total_digits) * 100.0 if total_digits > 0 else 0.0
     ms_per_case = total_time_ms / total_cases if total_cases > 0 else 0.0
 

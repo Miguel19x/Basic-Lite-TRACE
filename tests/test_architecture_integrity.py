@@ -13,14 +13,13 @@ Verifica:
 4. MoE residente (MemoryAwarePagedMoE) con 4 expertos residentes + experto compartido.
 5. Inferencia forward pass en TRACECausalModel con 0 tensores FP32 en pesos BitLinear.
 """
+import torch
+
+from config import HybridConfig
 from trace.layers.ffn import TernaryExpert
 from trace.models.causal import TRACECausalModel
 from trace.modules.attention import BlockCausalGQATernaryAttention
 from trace.modules.paged_moe import MemoryAwarePagedMoE
-
-import torch
-
-from config import HybridConfig
 
 
 def test_default_production_config():
@@ -41,30 +40,49 @@ def test_sqlite_fts5_flag_sync():
 
 
 def test_ternary_expert_ffn():
-    expert = TernaryExpert(d_model=192, d_ff=384)
+    torch.manual_seed(42)
+    expert = TernaryExpert(d_model=192, d_ff=384).eval()
     x = torch.randn(2, 16, 192)
-    y = expert(x)
-    assert y.shape == (2, 16, 192)
+    with torch.no_grad():
+        y_fp32 = expert(x, add_sub_mode=False)
+        y_addsub = expert(x, add_sub_mode=True)
+    assert y_fp32.shape == (2, 16, 192)
+    assert y_addsub.shape == (2, 16, 192)
+    assert torch.isfinite(y_fp32).all(), "Salida FP32 de TernaryExpert contiene NaN/Inf."
+    assert torch.isfinite(y_addsub).all(), "Salida add_sub de TernaryExpert contiene NaN/Inf."
+    diff = float((y_fp32 - y_addsub).abs().max().item())
+    assert diff < 1e-4, f"Discrepancia FP32 vs add_sub_mode=True en TernaryExpert: {diff:.6e}"
 
 
 def test_paged_moe_resident_integrity():
+    torch.manual_seed(42)
     cfg = HybridConfig(num_recursions=1)
-    moe = MemoryAwarePagedMoE(cfg)
+    moe = MemoryAwarePagedMoE(cfg).eval()
     assert len(moe.expert_bank) == 4
     assert moe.use_shared_expert is True
 
     x = torch.randn(2, 16, 192)
     t = torch.ones(2, 16)
-    out, node_ids = moe(x, t)
+    with torch.no_grad():
+        out, node_ids = moe(x, t)
     assert out.shape == (2, 16, 192)
     assert node_ids.shape == (2, 16)
+    assert torch.isfinite(out).all(), "Salida de MemoryAwarePagedMoE contiene NaN/Inf."
 
 
 def test_trace_causal_model_resident_core():
-    cfg = HybridConfig(num_recursions=1)
-    model = TRACECausalModel(cfg)
+    torch.manual_seed(42)
+    cfg = HybridConfig(device="cpu", num_recursions=1, adaptive_recursion=False)
+    model = TRACECausalModel(cfg).eval()
     assert isinstance(model.resident_core.attn, BlockCausalGQATernaryAttention)
     assert isinstance(model.resident_core.paged_moe, MemoryAwarePagedMoE)
+
+    x = torch.randint(0, cfg.vocab_size, (1, 32), dtype=torch.long)
+    t = torch.ones(1)
+    with torch.no_grad():
+        logits = model.forward_backbone(x, t, stage_id=0)
+    assert logits.shape == (1, 32, cfg.vocab_size)
+    assert torch.isfinite(logits).all(), "Logits de TRACECausalModel contienen NaN/Inf."
 
 
 if __name__ == "__main__":

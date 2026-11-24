@@ -13,6 +13,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <math.h>
 
@@ -68,46 +69,55 @@ static const PagedLayerDesc g_paged_layers[] = {
     {NULL, 0}
 };
 
+static void free_workspace(TraceWorkspace* ws);
+
 static int init_workspace(TraceWorkspace* ws, int max_seq_len, int d_model, int d_ff_expert) {
     int max_dim = (d_ff_expert > d_model) ? d_ff_expert : d_model;
+    size_t seq = (size_t)max_seq_len;
+    size_t dm = (size_t)d_model;
+    size_t dff = (size_t)d_ff_expert;
+    size_t md = (size_t)max_dim;
     int err = 0;
     #define ALIGN_ALLOC(ptr, sz) do { \
         if (posix_memalign((void**)&(ptr), 64, (sz)) != 0) err = -1; \
     } while(0)
 
-    ALIGN_ALLOC(ws->x_norm, max_seq_len * max_dim * sizeof(float));
-    ALIGN_ALLOC(ws->q_x, max_seq_len * max_dim * sizeof(int8_t));
-    ALIGN_ALLOC(ws->acc_int32, max_seq_len * max_dim * sizeof(int32_t));
-    ALIGN_ALLOC(ws->scale_x, max_seq_len * sizeof(float));
+    ALIGN_ALLOC(ws->x_norm, seq * md * sizeof(float));
+    ALIGN_ALLOC(ws->q_x, seq * md * sizeof(int8_t));
+    ALIGN_ALLOC(ws->acc_int32, seq * md * sizeof(int32_t));
+    ALIGN_ALLOC(ws->scale_x, seq * sizeof(float));
 
-    ALIGN_ALLOC(ws->a, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->z_r, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->y_r, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->anchor_feat, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->joint_state, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->norm_z_buf, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->norm_y_buf, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->q, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->k, max_seq_len * (d_model / 2) * sizeof(float));
-    ALIGN_ALLOC(ws->v, max_seq_len * (d_model / 2) * sizeof(float));
-    ALIGN_ALLOC(ws->attn_out_heads, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->attn_final, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->z_mid, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->z_norm_moe, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->moe_out, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->shared_up_buf, max_seq_len * d_ff_expert * sizeof(float));
-    ALIGN_ALLOC(ws->shared_down_buf, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->fusion, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->delta_y, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->z_next, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->normed_y, max_seq_len * d_model * sizeof(float));
+    ALIGN_ALLOC(ws->a, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->z_r, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->y_r, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->anchor_feat, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->joint_state, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->norm_z_buf, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->norm_y_buf, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->q, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->k, seq * (dm / 2u) * sizeof(float));
+    ALIGN_ALLOC(ws->v, seq * (dm / 2u) * sizeof(float));
+    ALIGN_ALLOC(ws->attn_out_heads, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->attn_final, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->z_mid, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->z_norm_moe, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->moe_out, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->shared_up_buf, seq * dff * sizeof(float));
+    ALIGN_ALLOC(ws->shared_down_buf, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->fusion, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->delta_y, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->z_next, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->normed_y, seq * dm * sizeof(float));
 
-    ALIGN_ALLOC(ws->exp_tokens_in, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->exp_up_buf, max_seq_len * d_ff_expert * sizeof(float));
-    ALIGN_ALLOC(ws->exp_down_buf, max_seq_len * d_model * sizeof(float));
-    ALIGN_ALLOC(ws->exp_tok_idx, max_seq_len * sizeof(int));
-    ALIGN_ALLOC(ws->exp_tok_gate, max_seq_len * sizeof(float));
+    ALIGN_ALLOC(ws->exp_tokens_in, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->exp_up_buf, seq * dff * sizeof(float));
+    ALIGN_ALLOC(ws->exp_down_buf, seq * dm * sizeof(float));
+    ALIGN_ALLOC(ws->exp_tok_idx, seq * sizeof(int));
+    ALIGN_ALLOC(ws->exp_tok_gate, seq * sizeof(float));
     #undef ALIGN_ALLOC
+    if (err != 0) {
+        free_workspace(ws);
+    }
     return err;
 }
 
@@ -144,8 +154,14 @@ static int pread_exact(int fd, void* buf, size_t len, off_t off) {
     uint8_t* p = (uint8_t*)buf;
     size_t total = 0;
     while (total < len) {
-        ssize_t n = pread(fd, p + total, len - total, off + (off_t)total);
-        if (n <= 0) {
+        size_t remain = len - total;
+        size_t chunk = (remain > 0x7ffff000U) ? 0x7ffff000U : remain;
+        ssize_t n = pread(fd, p + total, chunk, off + (off_t)total);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) {
             return -1;
         }
         total += (size_t)n;
@@ -189,19 +205,24 @@ int trace_model_load_odirect(const char* bin_path, TraceModel* model) {
         return -2;
     }
 
-    ssize_t r = pread(fd, scratch, 4096, 0);
+    ssize_t r;
+    do {
+        r = pread(fd, scratch, 4096, 0);
+    } while (r < 0 && errno == EINTR);
     if (r < 0 && errno == EINVAL && used_odirect) {
         close(fd);
+        model->fd = -1;
         fd = open(bin_path, O_RDONLY);
         if (fd < 0) {
             free(scratch);
-            model->fd = -1;
             return -1;
         }
         used_odirect = 0;
         model->fd = fd;
         model->used_odirect = 0;
-        r = pread(fd, scratch, 4096, 0);
+        do {
+            r = pread(fd, scratch, 4096, 0);
+        } while (r < 0 && errno == EINTR);
     }
     model->pread_calls++;
     if (r < 64 || memcmp(scratch, "PBITCOS1", 8) != 0) {
@@ -211,21 +232,50 @@ int trace_model_load_odirect(const char* bin_path, TraceModel* model) {
         return -4;
     }
 
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 64) {
+        free(scratch);
+        close(fd);
+        model->fd = -1;
+        return -4;
+    }
+    uint64_t file_size = (uint64_t)st.st_size;
+
     const uint8_t* p = (const uint8_t*)scratch;
-    uint32_t page_sz, total_pages;
-    uint64_t idx_off, exp_off, res_off, pages_off;
+    uint32_t page_sz, fmt_code, total_pages;
+    uint64_t idx_off, exp_off, res_off, pages_off, total_sz;
     memcpy(&page_sz, p + 8, 4);
-    // Sin variable sin uso fmt_code para pasar -Werror
+    memcpy(&fmt_code, p + 12, 4);
     memcpy(&total_pages, p + 16, 4);
     memcpy(&idx_off, p + 20, 8);
     memcpy(&exp_off, p + 28, 8);
     memcpy(&res_off, p + 36, 8);
     memcpy(&pages_off, p + 44, 8);
+    memcpy(&total_sz, p + 52, 8);
+    free(scratch);
+
+    if (fmt_code != 1 ||
+        page_sz < sizeof(PagedHeader) ||
+        idx_off > exp_off || exp_off > file_size ||
+        res_off > pages_off || pages_off > total_sz || total_sz > file_size) {
+        close(fd);
+        model->fd = -1;
+        return -4;
+    }
+
+    uint64_t json_len_u64 = exp_off - idx_off;
+    uint64_t pool_size_u64 = (uint64_t)total_pages * (uint64_t)page_sz;
+    if (json_len_u64 == 0 || json_len_u64 > (uint64_t)(64u * 1024u * 1024u) ||
+        total_pages == 0 ||
+        (uint64_t)total_pages > (total_sz - pages_off) / (uint64_t)page_sz) {
+        close(fd);
+        model->fd = -1;
+        return -4;
+    }
 
     model->num_pages = total_pages;
     model->page_size = page_sz;
     model->pages_offset = pages_off;
-    free(scratch);
 
     model->cfg.vocab_size = 260;
     model->cfg.d_model = 192;
@@ -257,19 +307,33 @@ int trace_model_load_odirect(const char* bin_path, TraceModel* model) {
         return -5;
     }
 
-    size_t pool_size = (size_t)total_pages * page_sz;
+    size_t pool_size = (size_t)pool_size_u64;
     if (posix_memalign((void**)&model->page_pool, 4096, pool_size) != 0) {
         trace_model_free(model);
         return -5;
     }
 
-    // Única syscall de lectura contigua O_DIRECT para todo el page_pool
-    ssize_t n_read = pread(fd, model->page_pool, pool_size, (off_t)pages_off);
-    model->pread_calls++;
-    if (n_read != (ssize_t)pool_size) {
-        trace_model_free(model);
-        return -6;
+    // Lectura contigua O_DIRECT para todo el page_pool con reintento EINTR
+    size_t pool_read = 0;
+    while (pool_read < pool_size) {
+        size_t remain = pool_size - pool_read;
+        size_t chunk = (remain > 0x7ffff000U) ? 0x7ffff000U : remain;
+        ssize_t n_read = pread(fd, model->page_pool + pool_read, chunk, (off_t)(pages_off + pool_read));
+        if (n_read < 0) {
+            if (errno == EINTR) continue;
+            trace_model_free(model);
+            return -6;
+        }
+        if (n_read == 0) {
+            trace_model_free(model);
+            return -6;
+        }
+        model->pread_calls++;
+        pool_read += (size_t)n_read;
     }
+
+    close(fd);
+    model->fd = -1;
 
     int fd_meta = open(bin_path, O_RDONLY);
     if (fd_meta < 0) {
@@ -277,7 +341,7 @@ int trace_model_load_odirect(const char* bin_path, TraceModel* model) {
         return -7;
     }
 
-    size_t json_len = exp_off - idx_off;
+    size_t json_len = (size_t)json_len_u64;
     char* json_buf = (char*)malloc(json_len + 1);
     if (!json_buf) {
         close(fd_meta);
@@ -386,25 +450,46 @@ int trace_model_load_odirect(const char* bin_path, TraceModel* model) {
                 const char* pids_ptr = scan_json_key(name_end, obj_end, "page_ids");
                 if (pids_ptr) {
                     while (pids_ptr < obj_end && *pids_ptr != '[') pids_ptr++;
-                    pids_ptr++;
+                    if (pids_ptr < obj_end) pids_ptr++;
                     int pids[32];
                     int n_pids = 0;
-                    while (pids_ptr < obj_end && *pids_ptr != ']') {
+                    int pid_err = 0;
+                    while (pids_ptr < obj_end && *pids_ptr != ']' && n_pids < 32) {
                         while (pids_ptr < obj_end && (*pids_ptr == ' ' || *pids_ptr == ',')) pids_ptr++;
-                        if (*pids_ptr == ']') break;
-                        pids[n_pids++] = (int)strtol(pids_ptr, (char**)&pids_ptr, 10);
+                        if (pids_ptr >= obj_end || *pids_ptr == ']') break;
+                        char* endptr = NULL;
+                        long pid = strtol(pids_ptr, &endptr, 10);
+                        if (endptr == pids_ptr) {
+                            pid_err = 1;
+                            break;
+                        }
+                        pids_ptr = endptr;
+                        if (pid < 0 || (size_t)pid >= (size_t)total_pages) {
+                            pid_err = 1;
+                            break;
+                        }
+                        pids[n_pids++] = (int)pid;
+                    }
+                    if (pid_err || n_pids <= 0) {
+                        free(json_buf);
+                        close(fd_meta);
+                        trace_model_free(model);
+                        return -8;
+                    }
+                    uint8_t** ptrs = (uint8_t**)malloc((size_t)n_pids * sizeof(uint8_t*));
+                    if (!ptrs) {
+                        free(json_buf);
+                        close(fd_meta);
+                        trace_model_free(model);
+                        return -8;
+                    }
+                    for (int pi = 0; pi < n_pids; ++pi) {
+                        ptrs[pi] = model->page_pool + (size_t)pids[pi] * (size_t)page_sz;
                     }
                     target_layer->num_pages = n_pids;
-                    uint8_t** ptrs = (uint8_t**)malloc(n_pids * sizeof(uint8_t*));
-                    float sum_sc = 0.0f;
-                    for (int pi = 0; pi < n_pids; ++pi) {
-                        ptrs[pi] = model->page_pool + pids[pi] * page_sz;
-                        const PagedHeader* ph = (const PagedHeader*)ptrs[pi];
-                        sum_sc += ph->scale_w;
-                    }
                     target_layer->page_ptrs = (const uint8_t* const*)ptrs;
-                    // Protección contra división por cero
-                    target_layer->scale = (n_pids > 0) ? (sum_sc / (float)n_pids) : 0.0f;
+                    const PagedHeader* ph0 = (const PagedHeader*)ptrs[0];
+                    target_layer->scale = ph0->scale_w;
                     mapped_count++;
                 }
             }

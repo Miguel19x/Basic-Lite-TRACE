@@ -81,13 +81,21 @@ def ternary_addsub_matmul(x_int8: torch.Tensor, w_codes: torch.Tensor) -> torch.
     Retorna: [..., N] tensor int32 calculado exclusivamente por sumas y restas con OpenMP/AVX2.
     Si el kernel nativo no está disponible, realiza fallback equivalente en PyTorch.
     """
+    if x_int8.dtype != torch.int8 or w_codes.dtype != torch.int8:
+        raise ValueError(
+            f"ternary_addsub_matmul requiere tensores int8; recibido x={x_int8.dtype}, w={w_codes.dtype}"
+        )
+
     orig_shape = x_int8.shape
-    x_2d = x_int8.view(-1, orig_shape[-1]).contiguous()
+    x_2d = x_int8.reshape(-1, orig_shape[-1]).contiguous()
     w_2d = w_codes.contiguous()
 
     M, K = x_2d.shape
     N, K_w = w_2d.shape
     assert K == K_w, f"Dimensión interna K incompatible: {K} vs {K_w}"
+
+    if x_int8.device.type != "cpu" or w_codes.device.type != "cpu":
+        return torch.matmul(x_2d.to(torch.int32), w_2d.t().to(torch.int32)).reshape(*orig_shape[:-1], N)
 
     lib = compile_and_load_ternary_kernel()
     if lib is not None:
@@ -98,7 +106,7 @@ def ternary_addsub_matmul(x_int8: torch.Tensor, w_codes: torch.Tensor) -> torch.
             ctypes.c_void_p(out_2d.data_ptr()),
             M, K, N
         )
-        return out_2d.view(*orig_shape[:-1], N)
+        return out_2d.reshape(*orig_shape[:-1], N)
 
     # Fallback matemático transparente si no hay gcc/libternary.so
-    return torch.matmul(x_2d.to(torch.int32), w_2d.t().to(torch.int32)).view(*orig_shape[:-1], N)
+    return torch.matmul(x_2d.to(torch.int32), w_2d.t().to(torch.int32)).reshape(*orig_shape[:-1], N)

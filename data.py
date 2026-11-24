@@ -98,16 +98,14 @@ class ProceduralCompositionalDataset(Dataset):
                     for p_name, o_w, o_ms in self.PERFILES:
                         sub_w = int(round(b_w * m_w))
                         sub_ms = int(round(b_ms * m_ms))
+                        watt = max(5, min(999, sub_w + a_w + o_w))
+                        ms = max(1, min(999, sub_ms + a_ms + o_ms))
 
                         if getattr(cfg, "use_scratchpad", False):
-                            watt = max(5, min(999, sub_w + a_w + o_w))
-                            ms = max(1, min(999, sub_ms + a_ms + o_ms))
                             sub_w = max(1, min(999, sub_w))
                             sub_ms = max(1, min(999, sub_ms))
                             target_str = f"pw: {sub_w:03d}\npms: {sub_ms:03d}\nwatt: {watt:03d}\nms: {ms:03d}\n"
                         else:
-                            watt = max(5, min(999, int(round(b_w * m_w + a_w + o_w))))
-                            ms = max(1, min(999, int(round(b_ms * m_ms + a_ms + o_ms))))
                             target_str = f"watt: {watt:03d}\nms: {ms:03d}\n"
 
                         if getattr(cfg, "use_explicit_operands", False):
@@ -155,14 +153,19 @@ class ProceduralCompositionalDataset(Dataset):
             "test-composicional": comp_pool,
         }
 
-        chosen_pool = self.pools.get(split, train_pool)
+        if split not in self.pools:
+            raise ValueError(f"Split desconocido '{split}'. Opciones válidas: {sorted(self.pools.keys())}")
+        chosen_pool = self.pools[split]
         self.unique_records = list(chosen_pool)
 
         if num_samples is None:
             self.samples = list(chosen_pool)
         else:
             rng_sample = random.Random(cfg.seed)
-            self.samples = [rng_sample.choice(chosen_pool) for _ in range(num_samples)]
+            if num_samples <= len(chosen_pool):
+                self.samples = rng_sample.sample(chosen_pool, num_samples)
+            else:
+                self.samples = [rng_sample.choice(chosen_pool) for _ in range(num_samples)]
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -200,7 +203,7 @@ _SCRATCHPAD_FIXED_RE = re.compile(r"pw:\s*(\d{3})\s*\npms:\s*(\d{3})\s*\nwatt:\s
 
 def parse_fixed_prediction(text: str) -> tuple[bool, int | None, int | None]:
     """Analizador estricto para salidas de ancho fijo (3 dígitos obligatorios)."""
-    m = _WATT_MS_FIXED_RE.search(text)
+    m = _WATT_MS_FIXED_RE.fullmatch(text.strip())
     if m:
         try:
             return True, int(m.group(1)), int(m.group(2))
@@ -211,7 +214,7 @@ def parse_fixed_prediction(text: str) -> tuple[bool, int | None, int | None]:
 
 def parse_fixed_scratchpad(text: str) -> tuple[bool, int | None, int | None, int | None, int | None]:
     """Analizador estricto para salidas completas con scratchpad de ancho fijo."""
-    m = _SCRATCHPAD_FIXED_RE.search(text)
+    m = _SCRATCHPAD_FIXED_RE.fullmatch(text.strip())
     if m:
         try:
             return True, int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))

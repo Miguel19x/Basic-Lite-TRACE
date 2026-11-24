@@ -4,12 +4,13 @@
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 # SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
-from trace.layers.ffn import TernaryExpert
 from typing import Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from trace.layers.ffn import TernaryExpert
 
 
 class MemoryAwarePagedMoE(nn.Module):
@@ -62,7 +63,33 @@ class MemoryAwarePagedMoE(nn.Module):
                 shared_out = shared_out * non_pad_mask.unsqueeze(-1).float()
 
         B_blk = min(self.block_size, L)
-        num_blocks = L // B_blk
+        pad_len = (B_blk - (L % B_blk)) % B_blk
+        if pad_len > 0:
+            x_work = F.pad(x, (0, 0, 0, pad_len))
+            if non_pad_mask is not None:
+                non_pad_work = F.pad(non_pad_mask, (0, pad_len), value=False)
+            else:
+                non_pad_work = torch.cat(
+                    [
+                        torch.ones((B, L), dtype=torch.bool, device=x.device),
+                        torch.zeros((B, pad_len), dtype=torch.bool, device=x.device),
+                    ],
+                    dim=1,
+                )
+            if active_mask is not None:
+                if active_mask.dim() == 3:
+                    active_work = F.pad(active_mask, (0, 0, 0, pad_len), value=0.0)
+                else:
+                    active_work = F.pad(active_mask, (0, pad_len), value=0.0)
+            else:
+                active_work = None
+        else:
+            x_work = x
+            non_pad_work = non_pad_mask
+            active_work = active_mask
+
+        L_work = L + pad_len
+        num_blocks = L_work // B_blk
         num_total_blocks = B * num_blocks
 
         with torch.no_grad():
@@ -70,17 +97,17 @@ class MemoryAwarePagedMoE(nn.Module):
             dynamic_factor = self.capacity_factor * (1.25 - 0.50 * mean_t)
             k = max(1, min(B_blk, int(round((B_blk * dynamic_factor) / self.num_experts))))
 
-        x_blk = x.reshape(num_total_blocks, B_blk, D)
+        x_blk = x_work.reshape(num_total_blocks, B_blk, D)
         router_logits = self.router(x_blk)
         scores = F.softmax(router_logits, dim=-1)
 
-        if active_mask is not None:
-            act_blk = active_mask.reshape(num_total_blocks, B_blk, 1)
+        if active_work is not None:
+            act_blk = active_work.reshape(num_total_blocks, B_blk, 1)
             scores = scores * (0.10 + 0.90 * act_blk)
             scores = scores * (act_blk > 0.05).float()
 
-        if non_pad_mask is not None:
-            valid_blk = non_pad_mask.reshape(num_total_blocks, B_blk, 1).float()
+        if non_pad_work is not None:
+            valid_blk = non_pad_work.reshape(num_total_blocks, B_blk, 1).float()
             scores = scores * valid_blk
 
         curr_node_ids = scores.argmax(dim=-1).detach()
@@ -95,8 +122,9 @@ class MemoryAwarePagedMoE(nn.Module):
         x_flat = x_blk.reshape(-1, D)
         out_flat = torch.zeros_like(x_flat)
         block_offsets = (torch.arange(num_total_blocks, device=x.device) * B_blk).unsqueeze(1)
+        sorted_experts = sorted(active_experts_in_step)
 
-        for e_idx in active_experts_in_step:
+        for e_idx in sorted_experts:
             exp_mod = self.expert_bank[e_idx]
             idx_e = top_indices[:, e_idx, :]
             gate_e = top_gating[:, e_idx, :]
@@ -112,10 +140,11 @@ class MemoryAwarePagedMoE(nn.Module):
                 gates_active = flat_gate.index_select(0, active_idx).unsqueeze(-1)
                 selected = x_flat.index_select(0, token_indices)
                 expert_out = exp_mod(selected, record_telemetry, integer_mode, add_sub_mode) * gates_active
-                out_flat.index_add_(0, token_indices, expert_out)
+                out_flat.index_add_(0, token_indices, expert_out.to(out_flat.dtype))
 
-        self.last_selected_experts = list(active_experts_in_step)
-        return (out_flat.reshape(B, L, D) + shared_out), curr_node_ids
+        self.last_selected_experts = sorted_experts
+        moe_out = out_flat.reshape(B, L_work, D)[:, :L, :]
+        return (moe_out + shared_out), curr_node_ids
 
     def get_last_telemetry(self) -> dict[str, Any]:
         sel = getattr(self, "last_selected_experts", [])

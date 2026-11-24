@@ -4,15 +4,15 @@
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 # SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 from trace.layers.bitlinear import BitLinear
 from trace.layers.embeddings import SinusoidalStepEncoding
 from trace.layers.norm import RMSNorm
 from trace.modules.attention import BlockCausalGQATernaryAttention
 from trace.modules.paged_moe import MemoryAwarePagedMoE
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 
 class SharedResidentTernaryCore(nn.Module):

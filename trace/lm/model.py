@@ -10,16 +10,16 @@ Combina MLA 100% Ternaria, FFN denso ternario (Squared-ReLU), tied embeddings,
 soporte Continual QAT y gradient checkpointing opcional.
 """
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.utils.checkpoint as ckpt_utils
+
 from trace.layers.bitlinear import BitLinear
 from trace.layers.ffn import TernaryExpert
 from trace.layers.norm import RMSNorm
 from trace.lm.config import TRACELMConfig
 from trace.lm.mla import MultiHeadLatentAttention
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.utils.checkpoint as ckpt_utils
 
 
 class TRACELMBlock(nn.Module):
@@ -28,7 +28,13 @@ class TRACELMBlock(nn.Module):
         self.attn_norm = RMSNorm(cfg.d_model, eps=cfg.eps)
         self.attn = MultiHeadLatentAttention(cfg)
         self.ffn_norm = RMSNorm(cfg.d_model, eps=cfg.eps)
-        self.ffn = TernaryExpert(cfg.d_model, cfg.d_ff, eps=cfg.eps)
+        self.ffn = TernaryExpert(
+            cfg.d_model,
+            cfg.d_ff,
+            eps=cfg.eps,
+            quantize_weights_enabled=cfg.quantize_weights_enabled,
+            weight_scale_type=cfg.weight_scale_type,
+        )
 
     def forward(
         self,
@@ -148,14 +154,15 @@ class TRACELanguageModel(nn.Module):
         use_grad_checkpoint: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, list]:
         _, S = input_ids.shape
-        past_len = kv_caches[0][0].shape[1] if kv_caches is not None else 0
+        has_kv_cache = bool(kv_caches) and kv_caches[0] is not None
+        past_len = kv_caches[0][0].shape[1] if has_kv_cache else 0
         total_len = past_len + S
         add_sub = self.cfg.use_add_sub_inference if add_sub_mode is None else add_sub_mode
 
         x = self.tok_emb(input_ids)
 
         # Sin caché y sin absorción -> attn_mask=None habilita SDPA is_causal=True (FlashAttention-2)
-        if kv_caches is None and not use_weight_absorption:
+        if not has_kv_cache and not use_weight_absorption:
             attn_mask = None
         else:
             attn_mask = self.build_causal_mask(S, total_len, x.device)
@@ -163,7 +170,7 @@ class TRACELanguageModel(nn.Module):
         new_caches = []
         for idx, layer in enumerate(self.layers):
             c_in = kv_caches[idx] if kv_caches is not None else None
-            if self.training and use_grad_checkpoint and kv_caches is None:
+            if self.training and use_grad_checkpoint and not has_kv_cache:
 
                 def _ckpt_fn(inp: torch.Tensor, _layer: TRACELMBlock = layer) -> torch.Tensor:
                     out, _ = _layer(
@@ -223,12 +230,15 @@ class TRACELanguageModel(nn.Module):
         eos_token_id: int | None = None,
         quantize_kv_int8: bool = False,
     ) -> torch.Tensor:
+        if temperature < 0.0:
+            raise ValueError(f"temperature debe ser >= 0.0, recibido: {temperature}")
         self.eval()
         curr_ids = input_ids.clone()
         if max_new_tokens <= 0 or curr_ids.shape[1] >= self.cfg.max_seq_len:
             return curr_ids
 
         eos_id = eos_token_id if eos_token_id is not None else self.cfg.eos_token_id
+        finished = torch.zeros(curr_ids.shape[0], dtype=torch.bool, device=curr_ids.device)
 
         logits, _, kv_caches = self(
             curr_ids,
@@ -237,7 +247,8 @@ class TRACELanguageModel(nn.Module):
         )
         next_token = self._sample_next_token(logits[:, -1, :], temperature, top_k)
         curr_ids = torch.cat([curr_ids, next_token], dim=1)
-        if (next_token == eos_id).all():
+        finished = finished | (next_token.squeeze(-1) == eos_id)
+        if finished.all():
             return curr_ids
 
         for _ in range(max_new_tokens - 1):
@@ -250,8 +261,10 @@ class TRACELanguageModel(nn.Module):
                 quantize_kv_int8=quantize_kv_int8,
             )
             next_token = self._sample_next_token(logits[:, -1, :], temperature, top_k)
+            next_token = torch.where(finished.unsqueeze(-1), torch.full_like(next_token, eos_id), next_token)
             curr_ids = torch.cat([curr_ids, next_token], dim=1)
-            if (next_token == eos_id).all():
+            finished = finished | (next_token.squeeze(-1) == eos_id)
+            if finished.all():
                 break
 
         return curr_ids

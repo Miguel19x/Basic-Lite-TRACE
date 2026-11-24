@@ -89,24 +89,26 @@ int main(int argc, char** argv) {
            trace_lm_get_used_odirect(model), trace_lm_get_pread_calls(model));
 
     // 2. Cargar tokenizador si existe y preparar buffer de tokens con longitud max_seq_len
-    TraceTokenizer* tok = (TraceTokenizer*)malloc(trace_tokenizer_sizeof());
+    TraceTokenizer* tok = trace_tok_load(tokenizer_path);
     int max_seq = model->cfg.max_seq_len;
     int* all_tokens = (int*)malloc(sizeof(int) * (size_t)max_seq);
     if (!all_tokens) {
         fprintf(stderr, "Error: no se pudo reservar memoria para historial de tokens.\n");
         trace_lm_free(model);
-        if (tok) free(tok);
+        trace_tok_free(tok);
         return 1;
     }
 
     int prompt_len = 0;
-    if (tok && trace_tokenizer_load(tok, tokenizer_path) == 0) {
+    if (tok) {
         prompt_len = trace_tokenizer_encode(tok, (const uint8_t*)prompt, (int)strlen(prompt), all_tokens, max_seq);
         printf("Prompt tokenizado (%d tokens):\n", prompt_len);
     } else {
-        if (tok) {
-            free(tok);
-            tok = NULL;
+        if (max_seq < 3) {
+            fprintf(stderr, "Error: max_seq_len (%d) insuficiente para tokens sinteticos.\n", max_seq);
+            free(all_tokens);
+            trace_lm_free(model);
+            return 1;
         }
         printf("Aviso: tokenizador no encontrado en %s, usando tokens iniciales sinteticos.\n", tokenizer_path);
         all_tokens[0] = 10;
@@ -119,35 +121,55 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Error: prompt vacio o fallo en codificacion.\n");
         free(all_tokens);
         trace_lm_free(model);
-        if (tok) trace_tokenizer_free(tok);
+        trace_tok_free(tok);
         return 1;
     }
 
     // 3. Crear KV Cache y Workspace
+    const int prefill_chunk = 512;
     TraceLMKVCache* kv = trace_lm_kv_create(&model->cfg, model->cfg.max_seq_len, use_int8_kv);
-    TraceLMWorkspace* ws = trace_lm_workspace_create(&model->cfg, 512);
+    TraceLMWorkspace* ws = trace_lm_workspace_create(&model->cfg, prefill_chunk);
     if (!kv || !ws) {
         fprintf(stderr, "Error al inicializar KV Cache o Workspace.\n");
+        trace_lm_workspace_free(ws);
+        trace_lm_kv_free(kv);
         free(all_tokens);
         trace_lm_free(model);
-        if (tok) trace_tokenizer_free(tok);
+        trace_tok_free(tok);
         return 1;
     }
 
-    float* logits = (float*)malloc(sizeof(float) * model->cfg.vocab_size);
+    float* logits = (float*)malloc(sizeof(float) * (size_t)model->cfg.vocab_size);
     if (!logits) {
         fprintf(stderr, "Error al reservar buffer de logits.\n");
         free(all_tokens);
         trace_lm_workspace_free(ws);
         trace_lm_kv_free(kv);
         trace_lm_free(model);
-        if (tok) trace_tokenizer_free(tok);
+        trace_tok_free(tok);
         return 1;
     }
 
-    // 4. Prefill
+    // 4. Prefill en bloques <= 512 tokens para soportar prompts largos
     double t0 = get_time_sec();
-    int s_proc = trace_lm_forward(model, kv, all_tokens, prompt_len, logits, 1, ws);
+    int s_proc = 0;
+    for (int processed = 0; processed < prompt_len; ) {
+        int next_end = processed + prefill_chunk;
+        if (next_end > prompt_len) next_end = prompt_len;
+        int rc = trace_lm_forward(model, kv, all_tokens, next_end, logits, 1, ws);
+        if (rc < 0) {
+            fprintf(stderr, "Error en prefill trace_lm_forward (rc=%d).\n", rc);
+            free(all_tokens);
+            free(logits);
+            trace_lm_workspace_free(ws);
+            trace_lm_kv_free(kv);
+            trace_lm_free(model);
+            trace_tok_free(tok);
+            return 1;
+        }
+        s_proc += rc;
+        processed = next_end;
+    }
     double ttft = get_time_sec() - t0;
     printf("\nPrefill procesado (%d tokens nuevos): TTFT = %.2f ms\n", s_proc, ttft * 1000.0);
 
@@ -172,10 +194,9 @@ int main(int argc, char** argv) {
         if (tok) {
             uint8_t piece[128];
             int32_t t_id = (int32_t)next_tok;
-            int plen = trace_tokenizer_decode(tok, &t_id, 1, piece, sizeof(piece) - 1);
+            int plen = trace_tokenizer_decode(tok, &t_id, 1, piece, (int)sizeof(piece) - 1);
             if (plen > 0) {
-                piece[plen] = '\0';
-                printf("%s", (char*)piece);
+                fwrite(piece, 1, (size_t)plen, stdout);
                 fflush(stdout);
             }
         } else {
@@ -194,7 +215,11 @@ int main(int argc, char** argv) {
         all_tokens[current_len++] = next_tok;
 
         // Evaluar siguiente token (S = 1 preservando contexto en KV Cache)
-        trace_lm_forward(model, kv, all_tokens, current_len, logits, 1, ws);
+        int rc = trace_lm_forward(model, kv, all_tokens, current_len, logits, 1, ws);
+        if (rc < 0) {
+            fprintf(stderr, "\nError en decodificacion trace_lm_forward (rc=%d).\n", rc);
+            break;
+        }
 
         if (rep_pen > 1.0f) {
             trace_lm_apply_repetition_penalty(logits, model->cfg.vocab_size, all_tokens, current_len, rep_pen);
@@ -215,7 +240,7 @@ int main(int argc, char** argv) {
     trace_lm_workspace_free(ws);
     trace_lm_kv_free(kv);
     trace_lm_free(model);
-    if (tok) trace_tokenizer_free(tok);
+    trace_tok_free(tok);
 
     return 0;
 }

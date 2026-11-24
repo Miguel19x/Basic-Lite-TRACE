@@ -113,16 +113,18 @@ void paged_direct_matmul_fast_c_avx2(
     int64_t M,
     int64_t K
 ) {
+    if (!x || !page_blob || !out || M <= 0 || K <= 0) return;
     const PagedHeader* hdr = (const PagedHeader*)page_blob;
     if (hdr->fmt_code != 1) return;
     const uint32_t rows = hdr->rows;
     const uint16_t cols = hdr->cols;
+    if ((int64_t)cols > K) return;
     const uint8_t* payload = page_blob + sizeof(PagedHeader);
     int64_t padded_cols = ((int64_t)cols + 31) / 32 * 32;
     int64_t row_stride_bytes = padded_cols >> 2;
     int64_t total_work = M * (int64_t)rows * (int64_t)cols;
 
-    #pragma omp parallel for collapse(2) schedule(static) num_threads(2) if (total_work >= OMP_MIN_WORK_THRESHOLD)
+    #pragma omp parallel for collapse(2) schedule(static) if (total_work >= OMP_MIN_WORK_THRESHOLD)
     for (int64_t m = 0; m < M; ++m) {
         for (int64_t r = 0; r < (int64_t)rows; ++r) {
             const int8_t* x_row = x + m * K;
@@ -141,17 +143,20 @@ void paged_direct_matmul_fast_c_multi_avx2(
     int64_t K,
     int64_t total_out_features
 ) {
+    if (!x || !page_blobs || !out || num_pages <= 0 || M <= 0 || K <= 0 || total_out_features <= 0) return;
     int64_t total_work = M * total_out_features * K;
 
-    #pragma omp parallel for schedule(dynamic, 1) num_threads(2) if (total_work >= OMP_MIN_WORK_THRESHOLD)
+    #pragma omp parallel for schedule(dynamic, 1) if (total_work >= OMP_MIN_WORK_THRESHOLD)
     for (int64_t p = 0; p < num_pages; ++p) {
         const uint8_t* blob = page_blobs[p];
+        if (!blob) continue;
         const PagedHeader* hdr = (const PagedHeader*)blob;
         if (hdr->fmt_code != 1) continue;
 
         const uint32_t row_start = hdr->row_start;
         const uint32_t rows = hdr->rows;
         const uint16_t cols = hdr->cols;
+        if ((int64_t)cols > K || (uint64_t)row_start + (uint64_t)rows > (uint64_t)total_out_features) continue;
         const uint8_t* payload = blob + sizeof(PagedHeader);
         int64_t padded_cols = ((int64_t)cols + 31) / 32 * 32;
         int64_t row_stride_bytes = padded_cols >> 2;
@@ -210,6 +215,10 @@ void paged_direct_matmul_fast_c_multi_avx2(
                 const uint8_t* w_row_packed = payload + r * row_stride_bytes;
                 out_row[r] = avx2_dot_product_packed_fast(x_row, w_row_packed, cols);
             }
+        } else if (cols == 0) {
+            for (int64_t m = 0; m < M; ++m) {
+                memset(out + m * total_out_features + row_start, 0, sizeof(int32_t) * (size_t)rows);
+            }
         } else {
             for (int64_t r = 0; r < (int64_t)rows; ++r) {
                 const uint8_t* w_row_packed = payload + r * row_stride_bytes;
@@ -256,7 +265,7 @@ void paged_lowrank_matmul_row_c_avx2(
     int64_t row_stride_bytes = padded_cols >> 2;
     int64_t total_work = rows * K;
 
-    #pragma omp parallel for schedule(static) num_threads(2) if (total_work >= OMP_MIN_WORK_THRESHOLD)
+    #pragma omp parallel for schedule(static) if (total_work >= OMP_MIN_WORK_THRESHOLD)
     for (int64_t r = 0; r < rows; ++r) {
         const uint8_t* row_w = w_packed + r * row_stride_bytes;
         out[r] = avx2_dot_product_packed_fast(x, row_w, K);
@@ -273,7 +282,7 @@ void ternary_addsub_cpu_kernel_avx2(
 ) {
     int64_t total_work = M * N * K;
 
-    #pragma omp parallel for collapse(2) schedule(static) num_threads(2) if (total_work >= OMP_MIN_WORK_THRESHOLD)
+    #pragma omp parallel for collapse(2) schedule(static) if (total_work >= OMP_MIN_WORK_THRESHOLD)
     for (int64_t m = 0; m < M; ++m) {
         for (int64_t n = 0; n < N; ++n) {
             const int8_t* x_row = x + m * K;

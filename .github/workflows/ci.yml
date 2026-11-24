@@ -16,6 +16,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: 'pip'
 
       - name: Install system build tools
         run: sudo apt-get update && sudo apt-get install -y gcc libomp-dev
@@ -47,8 +48,48 @@ jobs:
           PYTHONPATH=. python tests/test_mla_serialization.py
           PYTHONPATH=. python tests/test_trace_lm_infer.py
           PYTHONPATH=. python tests/test_parity_fase3.py
+          PYTHONPATH=. python tests/test_parity_temporal.py
           if [ -f checkpoints/trace_s456_fase1_paged_bitcos.bin ]; then
             PYTHONPATH=. python tests/test_trace_infer.py
             PYTHONPATH=. python tests/test_parity_and_falsification.py
             PYTHONPATH=. python tests/test_benchmark_fase2.py
           fi
+
+  c-sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: 'pip'
+
+      - name: Install system build tools
+        run: sudo apt-get update && sudo apt-get install -y gcc libomp-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build and Test C Engine under ASan/UBSan (AVX2 + Scalar)
+        run: |
+          ASAN_LIB="$(gcc -print-file-name=libasan.so)"
+          SAN_CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -ffp-contract=off -fopenmp -Wall -Wextra -Werror -Wvla -I. -Icsrc"
+          make clean
+          make all CFLAGS="${SAN_CFLAGS}"
+          LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_avx2_kernel.py
+          LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_tokenizer_parity.py
+          LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_trace_lm_infer.py
+
+      - name: Build and Test C Engine under ASan/UBSan (Scalar-only, -UTRACE_ENABLE_AVX2)
+        run: |
+          ASAN_LIB="$(gcc -print-file-name=libasan.so)"
+          SAN_CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -ffp-contract=off -fopenmp -Wall -Wextra -Werror -Wvla -I. -Icsrc"
+          make clean
+          make all CFLAGS="${SAN_CFLAGS}" DISPATCH_DEFS="-UTRACE_ENABLE_AVX2" DISPATCH_OBJS="csrc/paged_dispatch.o csrc/paged_gemm_scalar.o"
+          LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_avx2_kernel.py
+          LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_tokenizer_parity.py
+          LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_trace_lm_infer.py

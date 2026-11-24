@@ -21,6 +21,9 @@ Certifica:
 
 import os
 import tempfile
+
+import torch
+
 from trace.lm.config import TRACELMConfig
 from trace.lm.model import TRACELanguageModel
 from trace.serialization.paged_bitcos import (
@@ -28,8 +31,6 @@ from trace.serialization.paged_bitcos import (
     PagedBitCOSSerializer,
     count_fp32_weights_in_bitlinear,
 )
-
-import torch
 
 
 def test_roundtrip_and_parity():
@@ -74,25 +75,26 @@ def test_roundtrip_and_parity():
 
         # 3. Inspección con PagedBitCOSReader
         reader = PagedBitCOSReader(bin_path)
+        try:
+            # Validación explícita de metadatos y ausencia de lm_head.weight duplicado
+            assert reader.get_architecture() == "trace-lm-v1", (
+                f"Arquitectura incorrecta: {reader.get_architecture()}"
+            )
+            config_read = reader.get_model_config()
+            assert config_read is not None, "get_model_config() no devolvió configuración."
+            assert config_read["d_model"] == cfg.d_model, (
+                f"d_model discrepante: {config_read['d_model']} vs {cfg.d_model}"
+            )
+            assert "lm_head.weight" not in reader.tensors_map, (
+                "Violación de invariante: 'lm_head.weight' se serializó por duplicado a pesar de estar ligado."
+            )
 
-        # Validación explícita de metadatos y ausencia de lm_head.weight duplicado
-        assert reader.get_architecture() == "trace-lm-v1", (
-            f"Arquitectura incorrecta: {reader.get_architecture()}"
-        )
-        config_read = reader.get_model_config()
-        assert config_read is not None, "get_model_config() no devolvió configuración."
-        assert config_read["d_model"] == cfg.d_model, (
-            f"d_model discrepante: {config_read['d_model']} vs {cfg.d_model}"
-        )
-        assert "lm_head.weight" not in reader.tensors_map, (
-            "Violación de invariante: 'lm_head.weight' se serializó por duplicado a pesar de estar ligado."
-        )
-
-        # 4. Recarga en modelo nuevo
-        fresh_model = TRACELanguageModel(cfg)
-        loaded_count = reader.load_into_model(fresh_model)
-        fresh_model.eval()
-        reader.close()
+            # 4. Recarga en modelo nuevo
+            fresh_model = TRACELanguageModel(cfg)
+            loaded_count = reader.load_into_model(fresh_model)
+            fresh_model.eval()
+        finally:
+            reader.close()
 
         assert loaded_count > 0
 
@@ -129,6 +131,7 @@ def test_roundtrip_and_parity():
 
 def test_export_audit_25m_preset():
     """Valida empaquetado, alineación física a 4096B y 0 FP32 en preset_25m."""
+    torch.manual_seed(42)
     cfg = TRACELMConfig.preset_25m()
     model = TRACELanguageModel(cfg)
     model.eval()
@@ -143,23 +146,25 @@ def test_export_audit_25m_preset():
         assert summary["architecture"] == "trace-lm-v1"
 
         reader = PagedBitCOSReader(bin_path)
-        breakdown = reader.get_accounting_breakdown()
+        try:
+            breakdown = reader.get_accounting_breakdown()
 
-        # Validación de alineación física estricta
-        page_size = reader.page_size
-        assert page_size == 4096
-        assert reader.pages_offset % page_size == 0, (
-            f"pages_offset ({reader.pages_offset}) no es múltiplo de {page_size}"
-        )
-        assert reader.total_pages * page_size == (reader.total_size - reader.pages_offset), (
-            "El tamaño de la región de páginas no coincide exactamente con total_pages * 4096"
-        )
+            # Validación de alineación física estricta
+            page_size = reader.page_size
+            assert page_size == 4096
+            assert reader.pages_offset % page_size == 0, (
+                f"pages_offset ({reader.pages_offset}) no es múltiplo de {page_size}"
+            )
+            assert reader.total_pages * page_size == (reader.total_size - reader.pages_offset), (
+                "El tamaño de la región de páginas no coincide exactamente con total_pages * 4096"
+            )
 
-        # Validación de recarga y 0 FP32
-        fresh_model = TRACELanguageModel(cfg)
-        reader.load_into_model(fresh_model)
-        fresh_model.eval()
-        reader.close()
+            # Validación de recarga y 0 FP32
+            fresh_model = TRACELanguageModel(cfg)
+            reader.load_into_model(fresh_model)
+            fresh_model.eval()
+        finally:
+            reader.close()
 
         fp32_count = count_fp32_weights_in_bitlinear(fresh_model)
         assert fp32_count == 0, f"Violación de contrato: {fp32_count} pesos FP32 en BitLinear."
@@ -176,8 +181,26 @@ def test_export_audit_25m_preset():
     print(f"✓ Auditoría Preset 25M superada: {summary['total_pages']} páginas ({page_bytes / 1024:.1f} KB), 0 FP32.")
 
 
+def test_corrupt_bin_magic_rejected():
+    """Verifica que PagedBitCOSReader rechace archivos .bin con cabecera/magic corrupto."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        corrupt_path = os.path.join(tmp_dir, "corrupt_magic.bin")
+        with open(corrupt_path, "wb") as f:
+            f.write(b"BADMAGIC" + bytes(120))
+
+        rejected = False
+        try:
+            reader = PagedBitCOSReader(corrupt_path)
+            reader.close()
+        except (AssertionError, ValueError):
+            rejected = True
+        assert rejected, "PagedBitCOSReader debía rechazar un archivo .bin con magic corrupto."
+    print("✓ Prueba negativa de magic corrupto en PagedBitCOSReader superada.")
+
+
 if __name__ == "__main__":
     torch.set_num_threads(2)
     test_roundtrip_and_parity()
     test_export_audit_25m_preset()
+    test_corrupt_bin_magic_rejected()
     print("✓ Todos los tests de serialización Paged BitCOS v1.1 pasaron exitosamente.")

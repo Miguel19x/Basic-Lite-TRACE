@@ -19,9 +19,8 @@ import inspect
 import json
 import math
 import os
+import random
 import time
-from trace.lm.config import TRACELMConfig
-from trace.lm.model import TRACELanguageModel
 
 import numpy as np
 import torch
@@ -31,6 +30,8 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
 from export_paged_lm import export_lm_checkpoint
+from trace.lm.config import TRACELMConfig
+from trace.lm.model import TRACELanguageModel
 
 
 class MemmapDataset(Dataset):
@@ -144,10 +145,12 @@ def save_checkpoint(
     cfg: TRACELMConfig,
     step: int,
     best_val_loss: float,
+    epoch: int = 0,
 ) -> None:
     raw_model = unwrap_model(model)
     payload = {
         "step": step,
+        "epoch": epoch,
         "model_state": raw_model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "scheduler_state": scheduler.state_dict(),
@@ -220,6 +223,7 @@ def main() -> None:
     parser.add_argument("--save-every", type=int, default=500, help="Frecuencia de guardado (pasos)")
 
     # Flags operativos
+    parser.add_argument("--seed", type=int, default=42, help="Semilla aleatoria global")
     parser.add_argument("--smoke", action="store_true", help="Smoke test rápido en CPU")
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint .pt para reanudar")
     parser.add_argument("--compile", action="store_true", help="Activar torch.compile()")
@@ -229,10 +233,28 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if args.grad_accum_steps < 1:
+        raise ValueError(f"--grad-accum-steps debe ser >= 1, recibido: {args.grad_accum_steps}")
+    if args.log_every < 1:
+        raise ValueError(f"--log-every debe ser >= 1, recibido: {args.log_every}")
+    if args.eval_every < 1:
+        raise ValueError(f"--eval-every debe ser >= 1, recibido: {args.eval_every}")
+    if args.save_every < 1:
+        raise ValueError(f"--save-every debe ser >= 1, recibido: {args.save_every}")
+    if not (0.0 <= args.fp16_warmup_ratio < 1.0):
+        raise ValueError(f"--fp16-warmup-ratio debe estar en [0.0, 1.0), recibido: {args.fp16_warmup_ratio}")
+
     is_dist, rank, world_size, local_rank = setup_distributed()
     device, device_type = get_device(local_rank)
     if device_type == "cpu":
         torch.set_num_threads(2)
+
+    seed = args.seed + rank
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     if args.max_steps is None:
         args.max_steps = 5 if args.smoke else 5000
@@ -245,7 +267,7 @@ def main() -> None:
     if args.resume is not None:
         if not os.path.exists(args.resume):
             raise FileNotFoundError(f"Checkpoint de reanudación no encontrado: {args.resume}")
-        ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
+        ckpt = torch.load(args.resume, map_location="cpu", weights_only=True)
 
     if ckpt is not None and "cfg" in ckpt:
         raw_cfg = ckpt["cfg"]
@@ -308,12 +330,14 @@ def main() -> None:
     # 2. Instanciación y restauración de estado
     model = TRACELanguageModel(cfg)
     start_step = 0
+    start_epoch = 0
     best_val_loss = float("inf")
 
     if ckpt is not None:
         state_key = "model_state" if "model_state" in ckpt else "model_state_dict"
         model.load_state_dict(ckpt[state_key], strict=True)
         start_step = int(ckpt.get("step", 0))
+        start_epoch = int(ckpt.get("epoch", 0))
         best_val_loss = float(ckpt.get("best_val_loss", float("inf")))
         if rank == 0:
             print(f"[Resume] Restaurado desde {args.resume} (paso {start_step}, best_val_loss={best_val_loss:.4f})")
@@ -327,13 +351,13 @@ def main() -> None:
 
     model.to(device)
 
-    if is_dist:
-        model = DDP(model, device_ids=[local_rank] if device_type == "cuda" else None)
-
     if args.compile and hasattr(torch, "compile"):
         if rank == 0:
             print("[Compile] Compilando grafo con torch.compile()...")
         model = torch.compile(model)
+
+    if is_dist:
+        model = DDP(model, device_ids=[local_rank] if device_type == "cuda" else None)
 
     # 3. Optimizador, Scheduler y GradScaler
     optimizer = configure_optimizer(model, args.lr, args.weight_decay, device_type)
@@ -360,6 +384,7 @@ def main() -> None:
         raise ValueError(f"Dataset insuficiente para seq_len={cfg.max_seq_len}: train={len(train_ds)}, val={len(val_ds)}")
 
     train_sampler = DistributedSampler(train_ds, shuffle=True) if is_dist else None
+    val_sampler = DistributedSampler(val_ds, shuffle=False) if is_dist else None
     num_workers = 2 if (device_type == "cuda" and not args.smoke) else 0
     train_loader = DataLoader(
         train_ds,
@@ -375,6 +400,7 @@ def main() -> None:
         val_ds,
         batch_size=args.batch_size,
         shuffle=False,
+        sampler=val_sampler,
         num_workers=0,
         pin_memory=(device_type == "cuda"),
     )
@@ -382,7 +408,9 @@ def main() -> None:
     # 5. Bucle de Entrenamiento (cero .item() por iteración)
     model.train()
     step = start_step
-    epoch = 0
+    epoch = start_epoch
+    if train_sampler is not None:
+        train_sampler.set_epoch(epoch)
     running_loss = torch.zeros(1, device=device, dtype=torch.float32)
     steps_since_log = 0
     accum_tokens = 0
@@ -420,9 +448,10 @@ def main() -> None:
             y = y.to(device, non_blocking=True)
             accum_tokens += x.numel() * world_size
 
+            ddp_mod = model._orig_mod if hasattr(model, "_orig_mod") else model
             sync_ctx = (
-                model.no_sync()
-                if (is_dist and isinstance(model, DDP) and micro < args.grad_accum_steps - 1)
+                ddp_mod.no_sync()
+                if (is_dist and isinstance(ddp_mod, DDP) and micro < args.grad_accum_steps - 1)
                 else contextlib.nullcontext()
             )
             with sync_ctx:
@@ -435,18 +464,22 @@ def main() -> None:
                     scaled_loss.backward()
             step_loss += loss.detach().float() / float(args.grad_accum_steps)
 
+        step_skipped = False
         if scaler is not None:
+            scale_before = scaler.get_scale()
             if args.grad_clip > 0.0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             scaler.step(optimizer)
             scaler.update()
+            step_skipped = scaler.get_scale() < scale_before
         else:
             if args.grad_clip > 0.0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step()
 
-        scheduler.step()
+        if not step_skipped:
+            scheduler.step()
         running_loss += step_loss
         steps_since_log += 1
         step += 1
@@ -501,19 +534,23 @@ def main() -> None:
                             "timestamp": time.time(),
                         }) + "\n"
                     )
-                can_save_best = (step >= continual_warmup_steps) or (step == args.max_steps)
+                can_save_best = (
+                    unwrap_model(model).cfg.quantize_weights_enabled
+                    or (continual_warmup_steps == 0)
+                    or (step == args.max_steps)
+                )
                 if can_save_best and val_loss < best_val_loss:
                     best_val_loss = val_loss
                     best_path = os.path.join(args.save_dir, "best_model.pt")
-                    save_checkpoint(best_path, model, optimizer, scheduler, scaler, cfg, step, best_val_loss)
+                    save_checkpoint(best_path, model, optimizer, scheduler, scaler, cfg, step, best_val_loss, epoch=epoch)
                     print(f"✓ Mejor checkpoint actualizado en {best_path}")
 
         # Checkpoint periódico y puntero fijo last.pt
         if (step % args.save_every == 0 or step == args.max_steps) and rank == 0:
             ckpt_path = os.path.join(args.save_dir, f"checkpoint_step_{step}.pt")
             last_path = os.path.join(args.save_dir, "last.pt")
-            save_checkpoint(ckpt_path, model, optimizer, scheduler, scaler, cfg, step, best_val_loss)
-            save_checkpoint(last_path, model, optimizer, scheduler, scaler, cfg, step, best_val_loss)
+            save_checkpoint(ckpt_path, model, optimizer, scheduler, scaler, cfg, step, best_val_loss, epoch=epoch)
+            save_checkpoint(last_path, model, optimizer, scheduler, scaler, cfg, step, best_val_loss, epoch=epoch)
             print(f"✓ Checkpoint guardado en {ckpt_path} (y {last_path})")
 
     # 6. Exportación final a Paged BitCOS v1.1
@@ -528,6 +565,7 @@ def main() -> None:
         print("=" * 80)
 
     if is_dist:
+        dist.barrier()
         dist.destroy_process_group()
 
 

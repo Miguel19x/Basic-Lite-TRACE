@@ -5,12 +5,13 @@
 # SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 import math
-from trace.layers.norm import RMSNorm
-from trace.ops.ternary_cpu import ternary_addsub_matmul
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from trace.layers.norm import RMSNorm
+from trace.ops.ternary_cpu import ternary_addsub_matmul
 
 
 class BitLinear(nn.Module):
@@ -50,6 +51,22 @@ class BitLinear(nn.Module):
         self.register_buffer("prev_codes", torch.zeros(out_features, in_features, dtype=torch.int8), persistent=False)
         self.last_stats: dict[str, float] = {}
         self.use_loaded_bitcos: bool = False
+        self._has_prev_codes: bool = False
+        self.register_load_state_dict_post_hook(self._on_load_state_dict)
+
+    @staticmethod
+    def _on_load_state_dict(module: "BitLinear", _incompatible_keys: object) -> None:
+        module.cached_w_eff = torch.empty(0, device=module.weight.device)
+        module.use_loaded_bitcos = False
+
+    def _scale_int32_output(
+        self,
+        acc_int32: torch.Tensor,
+        scale_x: torch.Tensor,
+        q_max: float,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return (acc_int32.float() * ((scale_x.float() / q_max) * self.packed_scale.float())).to(out_dtype)
 
     def quantize_weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         w_f32 = self.weight.float()
@@ -67,12 +84,14 @@ class BitLinear(nn.Module):
         return w_eff, q_w.detach(), scale_w.detach()
 
     def get_effective_weight(self) -> torch.Tensor:
+        if self.training and self.weight.numel() == 0:
+            raise RuntimeError("No se puede entrenar una capa BitLinear cargada desde Paged BitCOS sin pesos FP32.")
+        if self.use_loaded_bitcos:
+            return self.int8_codes.to(self.packed_scale.dtype) * self.packed_scale
         if self.training:
             if self.cached_w_eff.numel() > 0:
                 self.cached_w_eff = torch.empty(0, device=self.weight.device)
             return self.quantize_weights()[0]
-        if self.use_loaded_bitcos:
-            return self.int8_codes.to(self.packed_scale.dtype) * self.packed_scale
         if not self.quantize_weights_enabled:
             return self.weight
         if self.cached_w_eff.numel() == 0:
@@ -82,6 +101,8 @@ class BitLinear(nn.Module):
     @torch.no_grad()
     def refresh_eval_cache(self) -> None:
         """Precalcula W_eff y códigos ternarios una sola vez al pasar a eval()."""
+        if self.use_loaded_bitcos or not self.quantize_weights_enabled:
+            return
         w_eff, q_w, scale_w = self.quantize_weights()
         self.cached_w_eff = w_eff.detach().clone()
         self.int8_codes.copy_(q_w.to(torch.int8))
@@ -94,6 +115,9 @@ class BitLinear(nn.Module):
         integer_mode: bool = False,
         add_sub_mode: bool = False,
     ) -> torch.Tensor:
+        if self.training and self.weight.numel() == 0:
+            raise RuntimeError("No se puede entrenar una capa BitLinear cargada desde Paged BitCOS sin pesos FP32.")
+
         x_norm = self.sub_ln(x) if (self.sub_ln is not None and self.use_sub_ln) else x
 
         # Fase continua de Continual QAT (16-bit -> 1.58-bit): evita cuantizar activaciones/pesos en warmup
@@ -102,32 +126,33 @@ class BitLinear(nn.Module):
 
         if not self.quantize_activations:
             w_eff = self.get_effective_weight()
-            return F.linear(x_norm, w_eff, bias=None)
+            return F.linear(x_norm, w_eff.to(x_norm.dtype), bias=None)
 
         q_max = 127.0
         x_norm_f32 = x_norm.float()
         scale_x = x_norm_f32.abs().amax(dim=-1, keepdim=True).clamp(min=self.eps)
 
+        # Blindaje para modelo cargado desde Paged BitCOS (0 pesos FP32 en RAM)
+        if self.use_loaded_bitcos:
+            q_x = torch.clamp(torch.round(x_norm_f32 * (q_max / scale_x)), -q_max, q_max)
+            if add_sub_mode:
+                acc_int32 = ternary_addsub_matmul(q_x.to(torch.int8), self.int8_codes)
+                return self._scale_int32_output(acc_int32, scale_x, q_max, x.dtype)
+            # Tanto para integer_mode como para evaluación por defecto
+            q_x_int = q_x.to(torch.int32)
+            w_codes_int = self.int8_codes.to(torch.int32)
+            acc_int32 = torch.matmul(q_x_int, w_codes_int.t())
+            return self._scale_int32_output(acc_int32, scale_x, q_max, x.dtype)
+
         if not self.training:
             q_x = torch.clamp(torch.round(x_norm_f32 * (q_max / scale_x)), -q_max, q_max)
-
-            # Blindaje para modelo cargado desde Paged BitCOS (0 pesos FP32 en RAM)
-            if self.use_loaded_bitcos:
-                if add_sub_mode:
-                    acc_int32 = ternary_addsub_matmul(q_x.to(torch.int8), self.int8_codes)
-                    return acc_int32.to(x.dtype) * ((scale_x / q_max).to(x_norm.dtype) * self.packed_scale)
-                # Tanto para integer_mode como para evaluación por defecto
-                q_x_int = q_x.to(torch.int32)
-                w_codes_int = self.int8_codes.to(torch.int32)
-                acc_int32 = torch.matmul(q_x_int, w_codes_int.t())
-                return acc_int32.to(x.dtype) * ((scale_x / q_max).to(x_norm.dtype) * self.packed_scale)
 
             if add_sub_mode:
                 if self.cached_w_eff.numel() == 0:
                     self.refresh_eval_cache()
                 # Inferencia aditiva pura vía kernel nativo C OpenMP/AVX2
                 acc_int32 = ternary_addsub_matmul(q_x.to(torch.int8), self.int8_codes)
-                return acc_int32.to(x.dtype) * ((scale_x / q_max).to(x_norm.dtype) * self.packed_scale)
+                return self._scale_int32_output(acc_int32, scale_x, q_max, x.dtype)
 
             if integer_mode:
                 if self.cached_w_eff.numel() == 0:
@@ -135,7 +160,7 @@ class BitLinear(nn.Module):
                 q_x_int = q_x.to(torch.int32)
                 w_codes_int = self.int8_codes.to(torch.int32)
                 acc_int32 = torch.matmul(q_x_int, w_codes_int.t())
-                return acc_int32.to(x.dtype) * ((scale_x / q_max).to(x_norm.dtype) * self.packed_scale)
+                return self._scale_int32_output(acc_int32, scale_x, q_max, x.dtype)
 
             if self.cached_w_eff.numel() == 0:
                 self.refresh_eval_cache()
@@ -157,7 +182,11 @@ class BitLinear(nn.Module):
                 zeros = float((codes_i8 == 0).sum().item()) / total
                 pos = float((codes_i8 == 1).sum().item()) / total
                 neg = float((codes_i8 == -1).sum().item()) / total
-                flips = float((codes_i8 != self.prev_codes).sum().item()) / total
+                if self._has_prev_codes:
+                    flips = float((codes_i8 != self.prev_codes).sum().item()) / total
+                else:
+                    flips = 0.0
+                    self._has_prev_codes = True
                 sat_ratio = float((q_x.abs() == q_max).float().mean().item())
 
                 self.prev_codes.copy_(codes_i8)

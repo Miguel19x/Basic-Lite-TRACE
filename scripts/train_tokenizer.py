@@ -16,6 +16,8 @@ import argparse
 import ctypes
 import os
 import time
+from pathlib import Path
+
 from trace.lm.tokenizer import FIRST_MERGE, VOCAB_SIZE, TRACETokenizer
 
 IN_DOMAIN_PROMPTS = [
@@ -34,7 +36,7 @@ GENERAL_PROMPTS = [
 
 
 def load_c_tokenizer_lib():
-    so_path = os.path.abspath("libtrace_tokenizer.so")
+    so_path = str(Path(__file__).resolve().parent.parent / "libtrace_tokenizer.so")
     assert os.path.exists(so_path), f"Falta {so_path}. Compila con make primero."
     lib = ctypes.CDLL(so_path)
     lib.trace_tokenizer_sizeof.restype = ctypes.c_size_t
@@ -109,23 +111,24 @@ def verify_c_parity(bin_path: str, tok: TRACETokenizer, prompts: list[str]) -> N
     ret = c_lib.trace_tokenizer_load(c_tok_buf, bin_path.encode("utf-8"))
     assert ret == 0, f"Error cargando tokenizer recién entrenado en C: {ret}"
 
-    out_c_buf = (ctypes.c_int32 * 2048)()
-    out_text_buf = ctypes.create_string_buffer(8192)
+    try:
+        out_c_buf = (ctypes.c_int32 * 2048)()
+        out_text_buf = ctypes.create_string_buffer(8192)
 
-    for p in prompts:
-        raw_b = p.encode("utf-8")
-        py_tokens = tok.encode(p)
+        for p in prompts:
+            raw_b = p.encode("utf-8")
+            py_tokens = tok.encode(p)
 
-        c_cnt = c_lib.trace_tokenizer_encode(c_tok_buf, raw_b, len(raw_b), out_c_buf, 2048)
-        c_tokens = [out_c_buf[i] for i in range(c_cnt)]
-        assert py_tokens == c_tokens, f"Discrepancia encode Py vs C en prompt: '{p[:30]}'"
+            c_cnt = c_lib.trace_tokenizer_encode(c_tok_buf, raw_b, len(raw_b), out_c_buf, 2048)
+            c_tokens = [out_c_buf[i] for i in range(c_cnt)]
+            assert py_tokens == c_tokens, f"Discrepancia encode Py vs C en prompt: '{p[:30]}'"
 
-        c_dec_len = c_lib.trace_tokenizer_decode(c_tok_buf, out_c_buf, c_cnt, out_text_buf, 8192)
-        assert c_dec_len == len(raw_b)
-        c_dec = out_text_buf.raw[:c_dec_len].decode("utf-8")
-        assert c_dec == p, f"Discrepancia decode Py vs C en prompt: '{p[:30]}'"
-
-    c_lib.trace_tokenizer_free(c_tok_buf)
+            c_dec_len = c_lib.trace_tokenizer_decode(c_tok_buf, out_c_buf, c_cnt, out_text_buf, 8192)
+            assert c_dec_len == len(raw_b)
+            c_dec = out_text_buf.raw[:c_dec_len].decode("utf-8")
+            assert c_dec == p, f"Discrepancia decode Py vs C en prompt: '{p[:30]}'"
+    finally:
+        c_lib.trace_tokenizer_free(c_tok_buf)
     print("✓ Certificación de paridad 100% C vs Python superada sobre el binario generado.")
 
 
@@ -159,9 +162,10 @@ def main():
 
     args = parser.parse_args()
 
-    assert FIRST_MERGE < args.vocab_size <= VOCAB_SIZE, (
-        f"vocab_size ({args.vocab_size}) debe estar en el rango ({FIRST_MERGE}, {VOCAB_SIZE}]"
-    )
+    if not (FIRST_MERGE < args.vocab_size <= 65535):
+        raise ValueError(
+            f"vocab_size ({args.vocab_size}) debe estar en el rango ({FIRST_MERGE}, 65535]"
+        )
 
     print("=" * 80)
     print("Basic-Lite TRACE — Entrenamiento de Tokenizador BPE 4096")

@@ -7,6 +7,7 @@
  */
 
 #include "paged_dispatch.h"
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,7 +24,7 @@ float trace_dot_f32_scalar(const float* a, const float* b, int n);
 void trace_axpy_f32_scalar(float* y, float a, const float* x, int n);
 
 // 2. AVX2 + FMA
-#if defined(TRACE_ENABLE_AVX2)
+#if defined(TRACE_ENABLE_AVX2) && (defined(__x86_64__) || defined(_M_X64))
 void paged_direct_matmul_fast_c_avx2(const int8_t* x, const uint8_t* page_blob, int32_t* out, int64_t M, int64_t K);
 void paged_direct_matmul_fast_c_multi_avx2(const int8_t* x, const uint8_t* const* page_blobs, int64_t num_pages, int32_t* out, int64_t M, int64_t K, int64_t total_out_features);
 void paged_lowrank_matmul_row_c_avx2(const int8_t* x, const uint8_t* w_packed, int32_t* out, int64_t rows, int64_t K);
@@ -34,90 +35,91 @@ float trace_dot_f32_avx2(const float* a, const float* b, int n);
 void trace_axpy_f32_avx2(float* y, float a, const float* x, int n);
 #endif
 
-// Tabla de punteros activos
-static paged_direct_matmul_fast_c_fn g_paged_direct_matmul_fast_c = paged_direct_matmul_fast_c_scalar;
-static paged_direct_matmul_fast_c_multi_fn g_paged_direct_matmul_fast_c_multi = paged_direct_matmul_fast_c_multi_scalar;
-static paged_lowrank_matmul_row_c_fn g_paged_lowrank_matmul_row_c = paged_lowrank_matmul_row_c_scalar;
-static ternary_addsub_cpu_kernel_fn g_ternary_addsub_cpu_kernel = ternary_addsub_cpu_kernel_scalar;
-static paged_absorb_uk_f32_fn g_paged_absorb_uk_f32 = paged_absorb_uk_f32_scalar;
-static paged_absorb_uv_f32_fn g_paged_absorb_uv_f32 = paged_absorb_uv_f32_scalar;
-static trace_dot_f32_fn g_trace_dot_f32 = trace_dot_f32_scalar;
-static trace_axpy_f32_fn g_trace_axpy_f32 = trace_axpy_f32_scalar;
+typedef struct {
+    const char* isa_name;
+    paged_direct_matmul_fast_c_fn paged_direct_matmul_fast_c;
+    paged_direct_matmul_fast_c_multi_fn paged_direct_matmul_fast_c_multi;
+    paged_lowrank_matmul_row_c_fn paged_lowrank_matmul_row_c;
+    ternary_addsub_cpu_kernel_fn ternary_addsub_cpu_kernel;
+    paged_absorb_uk_f32_fn paged_absorb_uk_f32;
+    paged_absorb_uv_f32_fn paged_absorb_uv_f32;
+    trace_dot_f32_fn trace_dot_f32;
+    trace_axpy_f32_fn trace_axpy_f32;
+} TraceKernelTable;
 
-static char g_active_isa[16] = "scalar";
-static int g_initialized = 0;
+static const TraceKernelTable g_scalar_kernels = {
+    "scalar",
+    paged_direct_matmul_fast_c_scalar,
+    paged_direct_matmul_fast_c_multi_scalar,
+    paged_lowrank_matmul_row_c_scalar,
+    ternary_addsub_cpu_kernel_scalar,
+    paged_absorb_uk_f32_scalar,
+    paged_absorb_uv_f32_scalar,
+    trace_dot_f32_scalar,
+    trace_axpy_f32_scalar
+};
 
-static void trace_cpu_autodetect(void) {
+#if defined(TRACE_ENABLE_AVX2) && (defined(__x86_64__) || defined(_M_X64))
+static const TraceKernelTable g_avx2_kernels = {
+    "avx2",
+    paged_direct_matmul_fast_c_avx2,
+    paged_direct_matmul_fast_c_multi_avx2,
+    paged_lowrank_matmul_row_c_avx2,
+    ternary_addsub_cpu_kernel_avx2,
+    paged_absorb_uk_f32_avx2,
+    paged_absorb_uv_f32_avx2,
+    trace_dot_f32_avx2,
+    trace_axpy_f32_avx2
+};
+#endif
+
+static _Atomic(const TraceKernelTable*) g_active_table = NULL;
+
+static const TraceKernelTable* select_autodetect_table(void) {
 #if defined(TRACE_ENABLE_AVX2) && (defined(__x86_64__) || defined(_M_X64))
     if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) {
-        trace_cpu_set_isa("avx2");
-        return;
+        return &g_avx2_kernels;
     }
 #endif
-    trace_cpu_set_isa("scalar");
+    return &g_scalar_kernels;
 }
 
-static void trace_cpu_init_dispatch(void) {
-    if (g_initialized) return;
-    g_initialized = 1;
+static const TraceKernelTable* trace_cpu_init_dispatch(void) {
+    const TraceKernelTable* tbl = atomic_load_explicit(&g_active_table, memory_order_acquire);
+    if (tbl) return tbl;
 
     const char* env_isa = getenv("TRACE_CPU_ISA");
-    if (env_isa && strlen(env_isa) > 0 && strcmp(env_isa, "auto") != 0) {
+    if (env_isa && env_isa[0] != '\0' && strcmp(env_isa, "auto") != 0) {
         trace_cpu_set_isa(env_isa);
-        return;
+        return atomic_load_explicit(&g_active_table, memory_order_acquire);
     }
 
-    trace_cpu_autodetect();
+    const TraceKernelTable* detected = select_autodetect_table();
+    atomic_store_explicit(&g_active_table, detected, memory_order_release);
+    return detected;
 }
 
 void trace_cpu_set_isa(const char* isa_name) {
     if (!isa_name || strcmp(isa_name, "auto") == 0) {
-        g_initialized = 1;
-        trace_cpu_autodetect();
+        atomic_store_explicit(&g_active_table, select_autodetect_table(), memory_order_release);
         return;
     }
 
     if (strcmp(isa_name, "scalar") == 0) {
-        g_paged_direct_matmul_fast_c = paged_direct_matmul_fast_c_scalar;
-        g_paged_direct_matmul_fast_c_multi = paged_direct_matmul_fast_c_multi_scalar;
-        g_paged_lowrank_matmul_row_c = paged_lowrank_matmul_row_c_scalar;
-        g_ternary_addsub_cpu_kernel = ternary_addsub_cpu_kernel_scalar;
-        g_paged_absorb_uk_f32 = paged_absorb_uk_f32_scalar;
-        g_paged_absorb_uv_f32 = paged_absorb_uv_f32_scalar;
-        g_trace_dot_f32 = trace_dot_f32_scalar;
-        g_trace_axpy_f32 = trace_axpy_f32_scalar;
-        snprintf(g_active_isa, sizeof(g_active_isa), "%s", "scalar");
-        g_initialized = 1;
+        atomic_store_explicit(&g_active_table, &g_scalar_kernels, memory_order_release);
         return;
     }
 
-#if defined(TRACE_ENABLE_AVX2)
-    if (strcmp(isa_name, "avx2") == 0) {
-        g_paged_direct_matmul_fast_c = paged_direct_matmul_fast_c_avx2;
-        g_paged_direct_matmul_fast_c_multi = paged_direct_matmul_fast_c_multi_avx2;
-        g_paged_lowrank_matmul_row_c = paged_lowrank_matmul_row_c_avx2;
-        g_ternary_addsub_cpu_kernel = ternary_addsub_cpu_kernel_avx2;
-        g_paged_absorb_uk_f32 = paged_absorb_uk_f32_avx2;
-        g_paged_absorb_uv_f32 = paged_absorb_uv_f32_avx2;
-        g_trace_dot_f32 = trace_dot_f32_avx2;
-        g_trace_axpy_f32 = trace_axpy_f32_avx2;
-        snprintf(g_active_isa, sizeof(g_active_isa), "%s", "avx2");
-        g_initialized = 1;
+#if defined(TRACE_ENABLE_AVX2) && (defined(__x86_64__) || defined(_M_X64))
+    if (strcmp(isa_name, "avx2") == 0 &&
+        __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) {
+        atomic_store_explicit(&g_active_table, &g_avx2_kernels, memory_order_release);
         return;
     }
 #endif
 
-    // Fallback a escalar si la ISA solicitada no está compilada en este target
-    g_paged_direct_matmul_fast_c = paged_direct_matmul_fast_c_scalar;
-    g_paged_direct_matmul_fast_c_multi = paged_direct_matmul_fast_c_multi_scalar;
-    g_paged_lowrank_matmul_row_c = paged_lowrank_matmul_row_c_scalar;
-    g_ternary_addsub_cpu_kernel = ternary_addsub_cpu_kernel_scalar;
-    g_paged_absorb_uk_f32 = paged_absorb_uk_f32_scalar;
-    g_paged_absorb_uv_f32 = paged_absorb_uv_f32_scalar;
-    g_trace_dot_f32 = trace_dot_f32_scalar;
-    g_trace_axpy_f32 = trace_axpy_f32_scalar;
-    snprintf(g_active_isa, sizeof(g_active_isa), "%s", "scalar");
-    g_initialized = 1;
+    // Fallback a escalar si la ISA solicitada no está compilada o soportada en este target
+    atomic_store_explicit(&g_active_table, &g_scalar_kernels, memory_order_release);
 }
 
 __attribute__((constructor))
@@ -126,46 +128,37 @@ static void trace_cpu_auto_init(void) {
 }
 
 const char* trace_cpu_active_isa(void) {
-    trace_cpu_init_dispatch();
-    return g_active_isa;
+    return trace_cpu_init_dispatch()->isa_name;
 }
 
 void paged_direct_matmul_fast_c(const int8_t* x, const uint8_t* page_blob, int32_t* out, int64_t M, int64_t K) {
-    trace_cpu_init_dispatch();
-    g_paged_direct_matmul_fast_c(x, page_blob, out, M, K);
+    trace_cpu_init_dispatch()->paged_direct_matmul_fast_c(x, page_blob, out, M, K);
 }
 
 void paged_direct_matmul_fast_c_multi(const int8_t* x, const uint8_t* const* page_blobs, int64_t num_pages, int32_t* out, int64_t M, int64_t K, int64_t total_out_features) {
-    trace_cpu_init_dispatch();
-    g_paged_direct_matmul_fast_c_multi(x, page_blobs, num_pages, out, M, K, total_out_features);
+    trace_cpu_init_dispatch()->paged_direct_matmul_fast_c_multi(x, page_blobs, num_pages, out, M, K, total_out_features);
 }
 
 void paged_lowrank_matmul_row_c(const int8_t* x, const uint8_t* w_packed, int32_t* out, int64_t rows, int64_t K) {
-    trace_cpu_init_dispatch();
-    g_paged_lowrank_matmul_row_c(x, w_packed, out, rows, K);
+    trace_cpu_init_dispatch()->paged_lowrank_matmul_row_c(x, w_packed, out, rows, K);
 }
 
 void ternary_addsub_cpu_kernel(const int8_t* x, const int8_t* w, int32_t* out, int64_t M, int64_t K, int64_t N) {
-    trace_cpu_init_dispatch();
-    g_ternary_addsub_cpu_kernel(x, w, out, M, K, N);
+    trace_cpu_init_dispatch()->ternary_addsub_cpu_kernel(x, w, out, M, K, N);
 }
 
 void paged_absorb_uk_f32(const float* q_c, const uint8_t* const* page_ptrs, int num_pages, float scale, float* q_c_abs, int n_heads, int qk_nope_head_dim, int kv_lora_rank, int S) {
-    trace_cpu_init_dispatch();
-    g_paged_absorb_uk_f32(q_c, page_ptrs, num_pages, scale, q_c_abs, n_heads, qk_nope_head_dim, kv_lora_rank, S);
+    trace_cpu_init_dispatch()->paged_absorb_uk_f32(q_c, page_ptrs, num_pages, scale, q_c_abs, n_heads, qk_nope_head_dim, kv_lora_rank, S);
 }
 
 void paged_absorb_uv_f32(const float* o_latent, const uint8_t* const* page_ptrs, int num_pages, float scale, float* o_heads, int n_heads, int v_head_dim, int kv_lora_rank, int S) {
-    trace_cpu_init_dispatch();
-    g_paged_absorb_uv_f32(o_latent, page_ptrs, num_pages, scale, o_heads, n_heads, v_head_dim, kv_lora_rank, S);
+    trace_cpu_init_dispatch()->paged_absorb_uv_f32(o_latent, page_ptrs, num_pages, scale, o_heads, n_heads, v_head_dim, kv_lora_rank, S);
 }
 
 float trace_dot_f32(const float* a, const float* b, int n) {
-    trace_cpu_init_dispatch();
-    return g_trace_dot_f32(a, b, n);
+    return trace_cpu_init_dispatch()->trace_dot_f32(a, b, n);
 }
 
 void trace_axpy_f32(float* y, float a, const float* x, int n) {
-    trace_cpu_init_dispatch();
-    g_trace_axpy_f32(y, a, x, n);
+    trace_cpu_init_dispatch()->trace_axpy_f32(y, a, x, n);
 }

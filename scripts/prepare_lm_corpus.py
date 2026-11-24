@@ -24,9 +24,11 @@ import os
 import random
 import sys
 from collections.abc import Generator
-from trace.lm.tokenizer import SPECIAL_EOS, TRACETokenizer
+from pathlib import Path
 
 import numpy as np
+
+from trace.lm.tokenizer import SPECIAL_EOS, TRACETokenizer
 
 SYNTHETIC_PROMPTS = [
     "La arquitectura neuronal Basic-Lite TRACE opera con cuantización ternaria W1.58A8 sobre arquitecturas x86_64 y ARM64.\n",
@@ -51,7 +53,7 @@ class FastTokenizerWrapper:
         self.c_max_out = 16384
         self.c_out_buf = None
 
-        so_path = os.path.abspath("libtrace_tokenizer.so")
+        so_path = str(Path(__file__).resolve().parent.parent / "libtrace_tokenizer.so")
         if os.path.exists(so_path):
             try:
                 c_lib = ctypes.CDLL(so_path)
@@ -132,6 +134,8 @@ def parse_dataset_mix(mix_str: str) -> list[tuple[str, str | None, float]]:
         else:
             raise ValueError(f"Formato de dataset inválido: {part}")
         weight = float(weight_str)
+        if weight <= 0.0:
+            raise ValueError(f"El peso del dataset debe ser positivo, recibido: {weight} en '{part}'")
         entries.append((repo.strip(), config, weight))
         total_w += weight
 
@@ -236,6 +240,8 @@ def main():
                         help="Tamaño objetivo del vocabulario BPE (4096 monolingüe, 8192 bilingüe).")
 
     args = parser.parse_args()
+    if not (0.0 < args.val_ratio < 1.0):
+        raise ValueError(f"--val-ratio debe estar en el intervalo abierto (0.0, 1.0), recibido: {args.val_ratio}")
     os.makedirs(args.output_dir, exist_ok=True)
     tok_dir = os.path.dirname(os.path.abspath(args.tokenizer))
     if tok_dir:
@@ -286,7 +292,7 @@ def main():
     val_buffer = []
     chunk_flush_size = 65536
     doc_count = 0
-    total_chars = 0
+    total_bytes = 0
     source_counts: dict[int, int] = {}
 
     def get_document_generator() -> Generator[tuple[int, str], None, None]:
@@ -297,70 +303,69 @@ def main():
             return
 
         if args.local_files:
-            s_idx = 0
             for p in args.local_files:
                 if not os.path.exists(p):
                     continue
                 with open(p, encoding="utf-8", errors="replace") as f:
                     content = f.read()
                     if passes_hygiene_filter(content):
-                        yield (s_idx, content)
-                        s_idx += 1
+                        yield (0, content)
             return
 
         mix_entries = parse_dataset_mix(args.dataset_mix) if args.dataset_mix else [(args.dataset, None, 1.0)]
         yield from iter_streaming_mix(mix_entries, seed=42)
 
     # 3. Tokenización y serialización en streaming a disco (cero acumulación en RAM)
-    with open(train_bin_path, "wb") as f_train, open(val_bin_path, "wb") as f_val:
-        for src_id, doc in get_document_generator():
-            if doc_count >= args.max_docs:
-                break
+    try:
+        with open(train_bin_path, "wb") as f_train, open(val_bin_path, "wb") as f_val:
+            for src_id, doc in get_document_generator():
+                if doc_count >= args.max_docs:
+                    break
 
-            doc_count += 1
-            total_chars += len(doc)
-            src_seen = source_counts.get(src_id, 0)
-            source_counts[src_id] = src_seen + 1
+                doc_count += 1
+                total_bytes += len(doc.encode("utf-8"))
+                src_seen = source_counts.get(src_id, 0)
+                source_counts[src_id] = src_seen + 1
 
-            tokens = tokenizer.encode(doc)
-            tokens.append(SPECIAL_EOS)
+                tokens = tokenizer.encode(doc)
+                tokens.append(SPECIAL_EOS)
 
-            # Selección estratificada balanceada por fuente
-            if (src_seen % val_stride) == (val_stride - 1):
-                val_buffer.extend(tokens)
-                val_tokens_count += len(tokens)
-            else:
-                train_buffer.extend(tokens)
-                train_tokens_count += len(tokens)
+                # Selección estratificada balanceada por fuente
+                if (src_seen % val_stride) == (val_stride - 1):
+                    val_buffer.extend(tokens)
+                    val_tokens_count += len(tokens)
+                else:
+                    train_buffer.extend(tokens)
+                    train_tokens_count += len(tokens)
 
-            if len(train_buffer) >= chunk_flush_size:
+                if len(train_buffer) >= chunk_flush_size:
+                    np.array(train_buffer, dtype=np.uint16).tofile(f_train)
+                    train_buffer.clear()
+
+                if len(val_buffer) >= chunk_flush_size:
+                    np.array(val_buffer, dtype=np.uint16).tofile(f_val)
+                    val_buffer.clear()
+
+            # Balanceo si la validación quedó vacía en corpus muy cortos
+            if val_tokens_count == 0 and len(train_buffer) > 0:
+                val_slice = max(1, int(len(train_buffer) * args.val_ratio))
+                val_buffer.extend(train_buffer[-val_slice:])
+                val_tokens_count += val_slice
+                train_buffer = train_buffer[:-val_slice]
+                train_tokens_count -= val_slice
+
+            # Vaciar buffers residuales
+            if train_buffer:
                 np.array(train_buffer, dtype=np.uint16).tofile(f_train)
                 train_buffer.clear()
-
-            if len(val_buffer) >= chunk_flush_size:
+            if val_buffer:
                 np.array(val_buffer, dtype=np.uint16).tofile(f_val)
                 val_buffer.clear()
-
-        # Balanceo si la validación quedó vacía en corpus muy cortos
-        if val_tokens_count == 0 and len(train_buffer) > 0:
-            val_slice = max(1, int(len(train_buffer) * args.val_ratio))
-            val_buffer.extend(train_buffer[-val_slice:])
-            val_tokens_count += val_slice
-            train_buffer = train_buffer[:-val_slice]
-            train_tokens_count -= val_slice
-
-        # Vaciar buffers residuales
-        if train_buffer:
-            np.array(train_buffer, dtype=np.uint16).tofile(f_train)
-            train_buffer.clear()
-        if val_buffer:
-            np.array(val_buffer, dtype=np.uint16).tofile(f_val)
-            val_buffer.clear()
-
-    tokenizer.close()
+    finally:
+        tokenizer.close()
 
     total_tokens = train_tokens_count + val_tokens_count
-    b_per_tok = (total_chars / total_tokens) if total_tokens > 0 else 0.0
+    b_per_tok = (total_bytes / total_tokens) if total_tokens > 0 else 0.0
 
     print("\n" + "=" * 80)
     print("✓ Preparación finalizada exitosamente:")

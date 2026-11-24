@@ -11,3 +11,6 @@ select = [
 ignore = [
     "E402",  # module-import-not-at-top (requerido para scripts de test/eval con sys.path.insert)
 ]
+
+[lint.isort]
+known-first-party = ["trace", "config", "data", "eval", "export_paged", "export_paged_lm"]

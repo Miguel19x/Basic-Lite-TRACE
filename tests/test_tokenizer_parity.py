@@ -17,6 +17,8 @@ Suite de Paridad y Validación Estricta para TRACETokenizer (Hito 3.1):
 import ctypes
 import os
 import tempfile
+from pathlib import Path
+
 from trace.lm.tokenizer import (
     SPECIAL_BOS,
     SPECIAL_EOS,
@@ -25,6 +27,8 @@ from trace.lm.tokenizer import (
     TRACETokenizer,
     pre_tokenize,
 )
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 TEST_SAMPLES = [
     "3.1415926535",
@@ -41,7 +45,7 @@ TEST_SAMPLES = [
 
 
 def load_c_tokenizer_lib():
-    so_path = os.path.abspath("libtrace_tokenizer.so")
+    so_path = str(REPO_ROOT / "libtrace_tokenizer.so")
     assert os.path.exists(so_path), f"El binario {so_path} no existe. Compila con make primero."
     lib = ctypes.CDLL(so_path)
 
@@ -131,64 +135,71 @@ def test_python_and_c_parity_and_roundtrip():
         ret = c_lib.trace_tokenizer_load(c_tok_buf, bin_path.encode("utf-8"))
         assert ret == 0, f"Error cargando tokenizer en C: {ret}"
 
-        out_c_buf = (ctypes.c_int32 * 2048)()
-        out_text_buf = ctypes.create_string_buffer(8192)
+        try:
+            out_c_buf = (ctypes.c_int32 * 2048)()
+            out_text_buf = ctypes.create_string_buffer(8192)
 
-        # 1. Prueba de cadena vacía
-        py_empty = tok.encode("")
-        assert py_empty == [], "Encode Python de cadena vacía debe ser lista vacía"
-        c_empty_cnt = c_lib.trace_tokenizer_encode(c_tok_buf, b"", 0, out_c_buf, 2048)
-        assert c_empty_cnt == 0, "Encode C de cadena vacía debe retornar 0 tokens"
-        c_empty_dec_len = c_lib.trace_tokenizer_decode(c_tok_buf, out_c_buf, 0, out_text_buf, 8192)
-        assert c_empty_dec_len == 0 and out_text_buf.raw[0] == 0, "Decode C de lista vacía debe retornar 0 bytes y null terminator"
-
-        # 2. Prueba de tokens especiales (deben ser omitidos en decode)
-        special_seq = [SPECIAL_BOS, SPECIAL_PAD, SPECIAL_MASK, SPECIAL_EOS]
-        py_spec_dec = tok.decode(special_seq)
-        assert py_spec_dec == "", f"Decode de tokens especiales debe ser vacío, se obtuvo: '{py_spec_dec}'"
-        c_spec_buf = (ctypes.c_int32 * len(special_seq))(*special_seq)
-        c_spec_dec_len = c_lib.trace_tokenizer_decode(c_tok_buf, c_spec_buf, len(special_seq), out_text_buf, 8192)
-        assert c_spec_dec_len == 0 and out_text_buf.raw[0] == 0, "Decode C de especiales debe ser vacío"
-
-        # 3. Pruebas de paridad sobre el banco completo TEST_SAMPLES
-        for text in TEST_SAMPLES:
-            raw_b = text.encode("utf-8")
-
-            # Encode en Python
-            py_tokens = tok.encode(text)
-
-            # Encode en C
-            c_count = c_lib.trace_tokenizer_encode(c_tok_buf, raw_b, len(raw_b), out_c_buf, 2048)
-            c_tokens = [out_c_buf[i] for i in range(c_count)]
-
-            # Paridad estricta bit a bit en tokens
-            assert py_tokens == c_tokens, (
-                f"Discrepancia encode Py vs C en '{text[:30]}...':\n"
-                f"Py: {py_tokens[:10]}... (len={len(py_tokens)})\n"
-                f"C : {c_tokens[:10]}... (len={len(c_tokens)})"
+            # 1. Prueba de cadena vacía
+            py_empty = tok.encode("")
+            assert py_empty == [], "Encode Python de cadena vacía debe ser lista vacía"
+            c_empty_cnt = c_lib.trace_tokenizer_encode(c_tok_buf, b"", 0, out_c_buf, 2048)
+            assert c_empty_cnt == 0, "Encode C de cadena vacía debe retornar 0 tokens"
+            c_empty_dec_len = c_lib.trace_tokenizer_decode(c_tok_buf, out_c_buf, 0, out_text_buf, 8192)
+            assert c_empty_dec_len == 0 and out_text_buf.raw[0] == 0, (
+                "Decode C de lista vacía debe retornar 0 bytes y null terminator"
             )
 
-            # Decode en Python
-            py_decoded = tok.decode(py_tokens)
-            assert py_decoded == text, f"Fallo round-trip Py: '{text[:20]}' != '{py_decoded[:20]}'"
+            # 2. Prueba de tokens especiales (deben ser omitidos en decode)
+            special_seq = [SPECIAL_BOS, SPECIAL_PAD, SPECIAL_MASK, SPECIAL_EOS]
+            py_spec_dec = tok.decode(special_seq)
+            assert py_spec_dec == "", f"Decode de tokens especiales debe ser vacío, se obtuvo: '{py_spec_dec}'"
+            c_spec_buf = (ctypes.c_int32 * len(special_seq))(*special_seq)
+            c_spec_dec_len = c_lib.trace_tokenizer_decode(c_tok_buf, c_spec_buf, len(special_seq), out_text_buf, 8192)
+            assert c_spec_dec_len == 0 and out_text_buf.raw[0] == 0, "Decode C de especiales debe ser vacío"
 
-            # Decode en C
-            c_text_len = c_lib.trace_tokenizer_decode(c_tok_buf, out_c_buf, c_count, out_text_buf, 8192)
-            assert c_text_len == len(raw_b), (
-                f"Fallo longitud decode C: {c_text_len} != {len(raw_b)} en muestra '{text[:20]}'"
-            )
-            c_decoded = out_text_buf.raw[:c_text_len].decode("utf-8")
-            assert c_decoded == text, f"Fallo round-trip C: '{text[:20]}' != '{c_decoded[:20]}'"
+            # 3. Pruebas de paridad sobre el banco completo TEST_SAMPLES
+            for text in TEST_SAMPLES:
+                raw_b = text.encode("utf-8")
 
-            # Decode con BOS y EOS encapsulados
-            tokens_wrapped = [SPECIAL_BOS] + py_tokens + [SPECIAL_EOS]
-            assert tok.decode(tokens_wrapped) == text, "Decode Python con BOS/EOS debe ignorar especiales"
-            c_wrap_buf = (ctypes.c_int32 * len(tokens_wrapped))(*tokens_wrapped)
-            c_wrap_len = c_lib.trace_tokenizer_decode(c_tok_buf, c_wrap_buf, len(tokens_wrapped), out_text_buf, 8192)
-            assert c_wrap_len == len(raw_b)
-            assert out_text_buf.raw[:c_wrap_len].decode("utf-8") == text, "Decode C con BOS/EOS debe ignorar especiales"
+                # Encode en Python
+                py_tokens = tok.encode(text)
 
-        c_lib.trace_tokenizer_free(c_tok_buf)
+                # Encode en C
+                c_count = c_lib.trace_tokenizer_encode(c_tok_buf, raw_b, len(raw_b), out_c_buf, 2048)
+                c_tokens = [out_c_buf[i] for i in range(c_count)]
+
+                # Paridad estricta bit a bit en tokens
+                assert py_tokens == c_tokens, (
+                    f"Discrepancia encode Py vs C en '{text[:30]}...':\n"
+                    f"Py: {py_tokens[:10]}... (len={len(py_tokens)})\n"
+                    f"C : {c_tokens[:10]}... (len={len(c_tokens)})"
+                )
+
+                # Decode en Python
+                py_decoded = tok.decode(py_tokens)
+                assert py_decoded == text, f"Fallo round-trip Py: '{text[:20]}' != '{py_decoded[:20]}'"
+
+                # Decode en C
+                c_text_len = c_lib.trace_tokenizer_decode(c_tok_buf, out_c_buf, c_count, out_text_buf, 8192)
+                assert c_text_len == len(raw_b), (
+                    f"Fallo longitud decode C: {c_text_len} != {len(raw_b)} en muestra '{text[:20]}'"
+                )
+                c_decoded = out_text_buf.raw[:c_text_len].decode("utf-8")
+                assert c_decoded == text, f"Fallo round-trip C: '{text[:20]}' != '{c_decoded[:20]}'"
+
+                # Decode con BOS y EOS encapsulados
+                tokens_wrapped = [SPECIAL_BOS] + py_tokens + [SPECIAL_EOS]
+                assert tok.decode(tokens_wrapped) == text, "Decode Python con BOS/EOS debe ignorar especiales"
+                c_wrap_buf = (ctypes.c_int32 * len(tokens_wrapped))(*tokens_wrapped)
+                c_wrap_len = c_lib.trace_tokenizer_decode(
+                    c_tok_buf, c_wrap_buf, len(tokens_wrapped), out_text_buf, 8192
+                )
+                assert c_wrap_len == len(raw_b)
+                assert out_text_buf.raw[:c_wrap_len].decode("utf-8") == text, (
+                    "Decode C con BOS/EOS debe ignorar especiales"
+                )
+        finally:
+            c_lib.trace_tokenizer_free(c_tok_buf)
         print("✓ Paridad bit a bit 100% Py vs C en encode/decode, round-trip, casos borde y especiales superados.")
 
 
@@ -216,28 +227,83 @@ def test_bilingual_large_vocab_roundtrip():
         ret = c_lib.trace_tokenizer_load(c_buf, bin_path.encode("utf-8"))
         assert ret == 0, f"Error cargando tokenizador bilingüe en C: {ret}"
 
-        out_c_buf = (ctypes.c_int32 * 2048)()
-        out_text_buf = ctypes.create_string_buffer(8192)
+        try:
+            out_c_buf = (ctypes.c_int32 * 2048)()
+            out_text_buf = ctypes.create_string_buffer(8192)
 
-        for text in bilingual_corpus:
-            raw_b = text.encode("utf-8")
-            py_toks = tok_loaded.encode(text)
-            c_cnt = c_lib.trace_tokenizer_encode(c_buf, raw_b, len(raw_b), out_c_buf, 2048)
-            c_toks = [out_c_buf[i] for i in range(c_cnt)]
-            assert py_toks == c_toks, f"Fallo paridad bilingüe: {text}"
-            py_dec = tok_loaded.decode(py_toks)
-            assert py_dec == text, f"Fallo decode bilingüe Py: {text}"
+            for text in bilingual_corpus:
+                raw_b = text.encode("utf-8")
+                py_toks = tok_loaded.encode(text)
+                c_cnt = c_lib.trace_tokenizer_encode(c_buf, raw_b, len(raw_b), out_c_buf, 2048)
+                c_toks = [out_c_buf[i] for i in range(c_cnt)]
+                assert py_toks == c_toks, f"Fallo paridad bilingüe: {text}"
+                py_dec = tok_loaded.decode(py_toks)
+                assert py_dec == text, f"Fallo decode bilingüe Py: {text}"
 
-            c_dec_len = c_lib.trace_tokenizer_decode(c_buf, out_c_buf, c_cnt, out_text_buf, 8192)
-            assert c_dec_len == len(raw_b)
-            assert out_text_buf.raw[:c_dec_len].decode("utf-8") == text
-
-        c_lib.trace_tokenizer_free(c_buf)
+                c_dec_len = c_lib.trace_tokenizer_decode(c_buf, out_c_buf, c_cnt, out_text_buf, 8192)
+                assert c_dec_len == len(raw_b)
+                assert out_text_buf.raw[:c_dec_len].decode("utf-8") == text
+        finally:
+            c_lib.trace_tokenizer_free(c_buf)
         print("✓ Paridad bilingüe de vocabulario ampliado superada exitosamente.")
+
+
+def test_negative_and_boundary_cases():
+    """Valida carga de .trtk corrupto/inexistente, truncamiento de búferes e IDs OOB en decode."""
+    c_lib = load_c_tokenizer_lib()
+    model_sz = c_lib.trace_tokenizer_sizeof()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 1. Archivo .trtk inexistente y corrupto
+        missing_path = os.path.join(tmpdir, "missing.trtk")
+        c_missing = ctypes.create_string_buffer(model_sz)
+        assert c_lib.trace_tokenizer_load(c_missing, missing_path.encode("utf-8")) < 0
+
+        corrupt_path = os.path.join(tmpdir, "corrupt.trtk")
+        with open(corrupt_path, "wb") as f:
+            f.write(b"BAD_TRTK_MAGIC_12345")
+        c_corrupt = ctypes.create_string_buffer(model_sz)
+        assert c_lib.trace_tokenizer_load(c_corrupt, corrupt_path.encode("utf-8")) < 0
+
+        # 2. Tokenizador válido para pruebas de truncamiento e IDs fuera de rango
+        tok = TRACETokenizer.train(["Hola mundo desde Basic-Lite TRACE 2026"], target_vocab_size=300, min_freq=1)
+        valid_path = os.path.join(tmpdir, "valid.trtk")
+        tok.save(valid_path)
+
+        c_buf = ctypes.create_string_buffer(model_sz)
+        assert c_lib.trace_tokenizer_load(c_buf, valid_path.encode("utf-8")) == 0
+        try:
+            # Truncamiento en encode: max_tokens más pequeño que la salida completa
+            sample = b"Hola mundo desde Basic-Lite TRACE 2026"
+            full_py = tok.encode(sample.decode("utf-8"))
+            assert len(full_py) > 4
+            small_tok_buf = (ctypes.c_int32 * 4)()
+            trunc_cnt = c_lib.trace_tokenizer_encode(c_buf, sample, len(sample), small_tok_buf, 4)
+            assert trunc_cnt == 4, f"Truncamiento encode esperaba 4 tokens, obtuvo {trunc_cnt}"
+            assert [small_tok_buf[i] for i in range(4)] == full_py[:4]
+
+            # Truncamiento en decode: max_text_len más pequeño que el texto completo
+            full_c_arr = (ctypes.c_int32 * len(full_py))(*full_py)
+            small_txt_buf = ctypes.create_string_buffer(6)
+            trunc_len = c_lib.trace_tokenizer_decode(c_buf, full_c_arr, len(full_py), small_txt_buf, 6)
+            assert 0 <= trunc_len < 6, f"Truncamiento decode excedió max_text_len: {trunc_len}"
+            assert small_txt_buf.raw[trunc_len] == 0, "Falta terminador nulo tras truncamiento en decode."
+
+            # IDs fuera de rango (negativos y >= vocab_size) deben omitirse sin crash
+            oob_tokens = [-5, -1, ord("O"), ord("K"), tok.vocab_size, tok.vocab_size + 999]
+            oob_arr = (ctypes.c_int32 * len(oob_tokens))(*oob_tokens)
+            out_oob = ctypes.create_string_buffer(64)
+            oob_len = c_lib.trace_tokenizer_decode(c_buf, oob_arr, len(oob_tokens), out_oob, 64)
+            assert oob_len == 2
+            assert out_oob.raw[:oob_len].decode("utf-8") == "OK"
+        finally:
+            c_lib.trace_tokenizer_free(c_buf)
+        print("✓ Pruebas negativas (.trtk corrupto/ausente, truncamiento de búfer e IDs OOB) superadas.")
 
 
 if __name__ == "__main__":
     test_digit_isolation_and_space_prefix()
     test_python_and_c_parity_and_roundtrip()
     test_bilingual_large_vocab_roundtrip()
+    test_negative_and_boundary_cases()
     print("✓ Todas las pruebas de paridad del tokenizador pasaron exitosamente.")

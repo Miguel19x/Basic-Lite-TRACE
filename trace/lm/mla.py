@@ -12,13 +12,14 @@ con soporte de caché INT8 simétrico [-127, 127].
 """
 
 import math
-from trace.layers.bitlinear import BitLinear
-from trace.layers.norm import RMSNorm
-from trace.lm.config import TRACELMConfig
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from trace.layers.bitlinear import BitLinear
+from trace.layers.norm import RMSNorm
+from trace.lm.config import TRACELMConfig
 
 
 def precompute_rope_frequencies(
@@ -156,6 +157,22 @@ class MultiHeadLatentAttention(nn.Module):
         w_uk_eff = self.w_uk.get_effective_weight()
         w_uv_eff = self.w_uv.get_effective_weight()
 
+        def _apply_mask(scores: torch.Tensor) -> torch.Tensor:
+            if attn_mask is None:
+                if S > 1:
+                    causal_mask = torch.zeros((S, total_S), device=scores.device, dtype=scores.dtype)
+                    causal_block = torch.triu(
+                        torch.full((S, S), float("-inf"), device=scores.device, dtype=scores.dtype),
+                        diagonal=1,
+                    )
+                    causal_mask[:, past_len:] = causal_block
+                    return scores + causal_mask.unsqueeze(0).unsqueeze(0)
+                return scores
+            mask_slice = attn_mask[..., :total_S]
+            if mask_slice.dtype == torch.bool:
+                return scores.masked_fill(~mask_slice, float("-inf"))
+            return scores + mask_slice.to(scores.dtype)
+
         # D. Atención: 1) Absorción completa, 2) SDPA nativo (entrenamiento/prefill), 3) Ruta estándar con caché
         if use_weight_absorption:
             w_uk_heads = w_uk_eff.to(q_c.dtype).view(self.n_heads, self.qk_nope_head_dim, self.kv_lora_rank)
@@ -163,27 +180,27 @@ class MultiHeadLatentAttention(nn.Module):
             q_c_absorbed = torch.einsum("b h s d, h d c -> b h s c", q_c, w_uk_heads)
             scores_c = torch.matmul(q_c_absorbed, c_kv.unsqueeze(1).transpose(-1, -2))
             scores_pe = torch.matmul(q_pe, k_pe.unsqueeze(1).transpose(-1, -2))
-            attn_scores = (scores_c + scores_pe) * self.scale
-            if attn_mask is not None:
-                attn_scores = attn_scores + attn_mask[:, :, :, :total_S]
+            attn_scores = _apply_mask((scores_c + scores_pe) * self.scale)
             attn_weights = F.softmax(attn_scores, dim=-1, dtype=torch.float32).to(q_c.dtype)
             o_latent = torch.matmul(attn_weights, c_kv.unsqueeze(1))
             out = torch.einsum("b h s c, h v c -> b h s v", o_latent, w_uv_heads)
         elif kv_cache is None and attn_mask is None:
-            k_c = F.linear(c_kv, w_uk_eff).view(B, total_S, self.n_heads, self.qk_nope_head_dim).transpose(1, 2)
-            v = F.linear(c_kv, w_uv_eff).view(B, total_S, self.n_heads, self.v_head_dim).transpose(1, 2)
+            w_uk_cast = w_uk_eff.to(c_kv.dtype)
+            w_uv_cast = w_uv_eff.to(c_kv.dtype)
+            k_c = F.linear(c_kv, w_uk_cast).view(B, total_S, self.n_heads, self.qk_nope_head_dim).transpose(1, 2)
+            v = F.linear(c_kv, w_uv_cast).view(B, total_S, self.n_heads, self.v_head_dim).transpose(1, 2)
             k_pe_heads = k_pe.unsqueeze(1).expand(-1, self.n_heads, -1, -1)
             q_all = torch.cat([q_c, q_pe], dim=-1)
             k_all = torch.cat([k_c, k_pe_heads], dim=-1)
             out = F.scaled_dot_product_attention(q_all, k_all, v, is_causal=(S > 1), scale=self.scale)
         else:
-            k_c = F.linear(c_kv, w_uk_eff).view(B, total_S, self.n_heads, self.qk_nope_head_dim).transpose(1, 2)
-            v = F.linear(c_kv, w_uv_eff).view(B, total_S, self.n_heads, self.v_head_dim).transpose(1, 2)
+            w_uk_cast = w_uk_eff.to(c_kv.dtype)
+            w_uv_cast = w_uv_eff.to(c_kv.dtype)
+            k_c = F.linear(c_kv, w_uk_cast).view(B, total_S, self.n_heads, self.qk_nope_head_dim).transpose(1, 2)
+            v = F.linear(c_kv, w_uv_cast).view(B, total_S, self.n_heads, self.v_head_dim).transpose(1, 2)
             scores_c = torch.matmul(q_c, k_c.transpose(-1, -2))
             scores_pe = torch.matmul(q_pe, k_pe.unsqueeze(1).transpose(-1, -2))
-            attn_scores = (scores_c + scores_pe) * self.scale
-            if attn_mask is not None:
-                attn_scores = attn_scores + attn_mask[:, :, :, :total_S]
+            attn_scores = _apply_mask((scores_c + scores_pe) * self.scale)
             attn_weights = F.softmax(attn_scores, dim=-1, dtype=torch.float32).to(q_c.dtype)
             out = torch.matmul(attn_weights, v)
 

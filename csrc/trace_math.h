@@ -16,6 +16,7 @@
 #include <immintrin.h>
 
 static inline void rms_norm(const float* x, const float* w, float* y, int d, float eps) {
+    if (!x || !y || d <= 0) return;
     __m256d s0 = _mm256_setzero_pd();
     __m256d s1 = _mm256_setzero_pd();
     int i = 0;
@@ -33,7 +34,8 @@ static inline void rms_norm(const float* x, const float* w, float* y, int d, flo
     double sum_sq = _mm_cvtsd_f64(sum128) + _mm_cvtsd_f64(_mm_unpackhi_pd(sum128, sum128));
     for (; i < d; ++i) sum_sq += (double)x[i] * (double)x[i];
 
-    float rstd = (float)(1.0 / sqrt(sum_sq / (double)d + (double)eps));
+    double denom = sum_sq / (double)d + (double)eps;
+    float rstd = (denom > 0.0) ? (float)(1.0 / sqrt(denom)) : 0.0f;
     __m256 vrstd = _mm256_set1_ps(rstd);
 
     int j = 0;
@@ -77,11 +79,13 @@ static inline float avx2_dot_product_f32(const float* a, const float* b, int n) 
 #else
 
 static inline void rms_norm(const float* x, const float* w, float* y, int d, float eps) {
+    if (!x || !y || d <= 0) return;
     double sum_sq = 0.0;
     for (int i = 0; i < d; ++i) {
         sum_sq += (double)x[i] * (double)x[i];
     }
-    float rstd = (float)(1.0 / sqrt(sum_sq / (double)d + (double)eps));
+    double denom = sum_sq / (double)d + (double)eps;
+    float rstd = (denom > 0.0) ? (float)(1.0 / sqrt(denom)) : 0.0f;
     if (w) {
         for (int i = 0; i < d; ++i) y[i] = x[i] * rstd * w[i];
     } else {

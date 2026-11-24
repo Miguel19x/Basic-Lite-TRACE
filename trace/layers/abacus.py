@@ -65,6 +65,10 @@ class AbacusEmbedding(nn.Module):
         mask_token_id: int | None = 257,
     ):
         super().__init__()
+        assert max_ranks >= 2, f"AbacusEmbedding requiere max_ranks >= 2, recibido: {max_ranks}"
+        assert 0 <= delimiter_rank < max_ranks, (
+            f"delimiter_rank ({delimiter_rank}) debe estar en [0, {max_ranks})"
+        )
         self.d_model = d_model
         self.max_ranks = max_ranks
         self.delimiter_rank = delimiter_rank

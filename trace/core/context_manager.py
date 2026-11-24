@@ -33,23 +33,36 @@ class HierarchicalContextManager:
         self.embedding_dim = embedding_dim
         self.enable_sqlite_context_l3 = enable_sqlite_context_l3
 
-        # Nivel 1: Buffer Activo en RAM
-        self.active_token_ids: list[int] = []
+        # Nivel 1: Buffer Activo en RAM (separado entre tokens fijados/recuperados y ventana deslizante)
+        self.pinned_token_ids: list[int] = []
+        self._sliding_active_token_ids: list[int] = []
         self.active_latent_kv: torch.Tensor | None = None
 
         # Nivel 2: Segmentos Comprimidos Latentes en RAM
         self.compressed_segments: list[dict[str, Any]] = []
 
+        self.total_tokens_ingested: int = 0
+        self.retrieval_queries_count: int = 0
+        self.retrieval_hits_count: int = 0
+
         # Nivel 3: Archivo Persistente (Base de datos SQLite indexada con FTS5 - Modo 30B)
         if self.enable_sqlite_context_l3:
             self.conn = sqlite3.connect(self.db_path)
             self._init_archive_db()
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT COALESCE(MAX(end_token_idx), 0) FROM context_archive")
+            row = cursor.fetchone()
+            self.total_tokens_ingested = int(row[0]) if row and row[0] is not None else 0
         else:
             self.conn = None
 
-        self.total_tokens_ingested: int = 0
-        self.retrieval_queries_count: int = 0
-        self.retrieval_hits_count: int = 0
+    @property
+    def active_token_ids(self) -> list[int]:
+        return self.pinned_token_ids + self._sliding_active_token_ids
+
+    @active_token_ids.setter
+    def active_token_ids(self, value: list[int]) -> None:
+        self._sliding_active_token_ids = list(value)
 
     def _init_archive_db(self) -> None:
         cursor = self.conn.cursor()
@@ -88,59 +101,70 @@ class HierarchicalContextManager:
         Si la ventana activa supera active_window_size, desplaza los tokens antiguos
         hacia el Nivel 2 (Comprimido) y los archiva en el Nivel 3 (Archivo Persistente).
         """
-        self.active_token_ids.extend(new_token_ids)
+        self._sliding_active_token_ids.extend(new_token_ids)
         self.total_tokens_ingested += len(new_token_ids)
 
         archived_chunks_count = 0
-        while len(self.active_token_ids) > self.active_window_size:
-            # Extraer segmento para archivar
-            seg_len = min(self.compressed_segment_size, len(self.active_token_ids) - self.active_window_size)
-            if seg_len <= 0:
-                break
-            seg_tokens = self.active_token_ids[:seg_len]
-            self.active_token_ids = self.active_token_ids[seg_len:]
-
-            start_idx = self.total_tokens_ingested - len(self.active_token_ids) - seg_len
-            end_idx = start_idx + seg_len
-
-            raw_bytes = bytes([t for t in seg_tokens if 0 <= t < 256])
-            raw_text = raw_bytes.decode("utf-8", errors="replace")
-            words = [w.strip() for w in raw_text.split() if len(w.strip()) > 0]
-            keywords_str = " ".join(words)
-
-            # 1. Archivar en Nivel 3 (Original exacto con FTS5 si está activo)
-            chunk_id = None
-            if self.enable_sqlite_context_l3 and self.conn is not None:
-                cursor = self.conn.cursor()
-                cursor.execute(
-                    """
-                    INSERT INTO context_archive (start_token_idx, end_token_idx, raw_bytes, raw_text, keywords)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (start_idx, end_idx, raw_bytes, raw_text, keywords_str),
+        use_sqlite = self.enable_sqlite_context_l3 and self.conn is not None
+        cursor = self.conn.cursor() if use_sqlite else None
+        try:
+            while len(self._sliding_active_token_ids) > self.active_window_size:
+                # Extraer segmento para archivar
+                seg_len = min(
+                    self.compressed_segment_size,
+                    len(self._sliding_active_token_ids) - self.active_window_size,
                 )
-                chunk_id = cursor.lastrowid
-                cursor.execute(
-                    """
-                    INSERT INTO context_archive_fts (rowid, raw_text, keywords)
-                    VALUES (?, ?, ?)
-                    """,
-                    (chunk_id, raw_text, keywords_str),
-                )
+                if seg_len <= 0:
+                    break
+                seg_tokens = self._sliding_active_token_ids[:seg_len]
+                self._sliding_active_token_ids = self._sliding_active_token_ids[seg_len:]
+
+                start_idx = self.total_tokens_ingested - len(self._sliding_active_token_ids) - seg_len
+                end_idx = start_idx + seg_len
+
+                raw_bytes = bytes([t for t in seg_tokens if 0 <= t < 256])
+                raw_text = raw_bytes.decode("utf-8", errors="replace")
+                words = [w.strip() for w in raw_text.split() if len(w.strip()) > 0]
+                keywords_str = " ".join(words)
+
+                # 1. Archivar en Nivel 3 (Original exacto con FTS5 si está activo)
+                chunk_id = None
+                if use_sqlite and cursor is not None:
+                    cursor.execute(
+                        """
+                        INSERT INTO context_archive (start_token_idx, end_token_idx, raw_bytes, raw_text, keywords)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (start_idx, end_idx, raw_bytes, raw_text, keywords_str),
+                    )
+                    chunk_id = cursor.lastrowid
+                    cursor.execute(
+                        """
+                        INSERT INTO context_archive_fts (rowid, raw_text, keywords)
+                        VALUES (?, ?, ?)
+                        """,
+                        (chunk_id, raw_text, keywords_str),
+                    )
+                else:
+                    chunk_id = len(self.compressed_segments) + 1
+
+                # 2. Comprimir en Nivel 2 (Resumen latente)
+                seg_summary = {
+                    "chunk_id": chunk_id,
+                    "start_idx": start_idx,
+                    "end_idx": end_idx,
+                    "token_count": seg_len,
+                    "keywords": words,
+                }
+                self.compressed_segments.append(seg_summary)
+                archived_chunks_count += 1
+
+            if use_sqlite and archived_chunks_count > 0:
                 self.conn.commit()
-            else:
-                chunk_id = len(self.compressed_segments) + 1
-
-            # 2. Comprimir en Nivel 2 (Resumen latente)
-            seg_summary = {
-                "chunk_id": chunk_id,
-                "start_idx": start_idx,
-                "end_idx": end_idx,
-                "token_count": seg_len,
-                "keywords": words,
-            }
-            self.compressed_segments.append(seg_summary)
-            archived_chunks_count += 1
+        except Exception:
+            if use_sqlite:
+                self.conn.rollback()
+            raise
 
         return {
             "active_tokens": len(self.active_token_ids),
@@ -179,14 +203,15 @@ class HierarchicalContextManager:
                     text_str = " ".join(seg_words)
                     results.append({
                         "chunk_id": seg["chunk_id"],
-                        "start_pos": seg["start_idx"],
-                        "end_pos": seg["end_idx"],
+                        "start_token_idx": seg["start_idx"],
+                        "end_token_idx": seg["end_idx"],
                         "text": text_str,
                         "raw_text": text_str,
                         "relevance_score": hits,
                     })
             results.sort(key=lambda x: x["relevance_score"], reverse=True)
-            self.retrieval_hits_count += len(results[:top_k])
+            if results:
+                self.retrieval_hits_count += 1
             return results[:top_k]
 
         cursor = self.conn.cursor()
@@ -207,15 +232,16 @@ class HierarchicalContextManager:
                 )
                 rows = cursor.fetchall()
             except sqlite3.OperationalError:
+                escaped_term = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 cursor.execute(
                     """
                     SELECT chunk_id, start_token_idx, end_token_idx, raw_text, keywords
                     FROM context_archive
-                    WHERE keywords LIKE ? OR raw_text LIKE ?
+                    WHERE keywords LIKE ? ESCAPE '\\' OR raw_text LIKE ? ESCAPE '\\'
                     ORDER BY chunk_id ASC
                     LIMIT ?
                     """,
-                    (f"%{term}%", f"%{term}%", top_k),
+                    (f"%{escaped_term}%", f"%{escaped_term}%", top_k),
                 )
                 rows = cursor.fetchall()
 
@@ -250,7 +276,7 @@ class HierarchicalContextManager:
         for ch in chunks:
             raw_text = ch.get("raw_text") or ch.get("text") or ""
             all_tokens.extend([b for b in raw_text.encode("utf-8")])
-        self.active_token_ids = all_tokens + self.active_token_ids
+        self.pinned_token_ids = all_tokens + self.pinned_token_ids
 
     def get_telemetry(self) -> dict[str, Any]:
         """Reporta telemetría de memoria y recuperación contextual de forma segura."""
@@ -261,16 +287,18 @@ class HierarchicalContextManager:
         else:
             total_archived_chunks = len(self.compressed_segments)
 
-        hit_rate = (
-            float(self.retrieval_hits_count) / float(max(1, self.retrieval_queries_count))
-        ) * 100.0
+        hit_rate = min(
+            100.0,
+            (float(self.retrieval_hits_count) / float(max(1, self.retrieval_queries_count))) * 100.0,
+        )
 
-        ram_active_bytes = len(self.active_token_ids)
+        active_len = len(self.active_token_ids)
+        ram_active_bytes = active_len
         total_tokens = max(1, self.total_tokens_ingested)
-        saving_ratio = round(float(total_tokens) / float(max(1, len(self.active_token_ids))), 2)
+        saving_ratio = round(float(total_tokens) / float(max(1, active_len)), 2)
 
         return {
-            "active_tokens_in_ram": len(self.active_token_ids),
+            "active_tokens_in_ram": active_len,
             "compressed_segments_count": len(self.compressed_segments),
             "archived_chunks_on_disk": total_archived_chunks,
             "total_tokens_ingested": self.total_tokens_ingested,
@@ -279,6 +307,12 @@ class HierarchicalContextManager:
             "ram_saving_ratio": saving_ratio,
             "retrieval_hit_rate_pct": round(hit_rate, 2),
         }
+
+    def __enter__(self) -> "HierarchicalContextManager":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
 
     def close(self) -> None:
         if hasattr(self, "conn") and self.conn is not None:

@@ -4,13 +4,13 @@
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 # SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
-from trace.layers.bitlinear import BitLinear
-from trace.layers.norm import RMSNorm
-from trace.layers.rotary import RotaryEmbedding
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from trace.layers.bitlinear import BitLinear
+from trace.layers.norm import RMSNorm
+from trace.layers.rotary import RotaryEmbedding
 
 
 def build_block_causal_mask(seq_len: int, block_size: int, device: torch.device) -> torch.Tensor:
@@ -64,6 +64,12 @@ class BlockCausalGQATernaryAttention(nn.Module):
     """
     def __init__(self, cfg):
         super().__init__()
+        assert cfg.d_model % cfg.n_heads == 0, (
+            f"d_model ({cfg.d_model}) debe ser divisible por n_heads ({cfg.n_heads})"
+        )
+        assert cfg.n_heads % cfg.n_kv_heads == 0, (
+            f"n_heads ({cfg.n_heads}) debe ser divisible por n_kv_heads ({cfg.n_kv_heads})"
+        )
         self.n_heads = cfg.n_heads
         self.n_kv_heads = cfg.n_kv_heads
         self.num_queries_per_kv = cfg.n_heads // cfg.n_kv_heads
@@ -85,6 +91,9 @@ class BlockCausalGQATernaryAttention(nn.Module):
     def _get_block_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         key = (seq_len, device)
         if key not in self._mask_cache:
+            if len(self._mask_cache) >= 8:
+                oldest_key = next(iter(self._mask_cache))
+                del self._mask_cache[oldest_key]
             self._mask_cache[key] = build_block_causal_mask(seq_len, self.block_size, device)
         return self._mask_cache[key]
 
@@ -131,7 +140,18 @@ class BlockCausalGQATernaryAttention(nn.Module):
         v_exp = self._repeat_kv(v_full)
 
         if kv_cache is not None:
-            attn_out = F.scaled_dot_product_attention(q, k_exp, v_exp, is_causal=False)
+            if attn_mask is not None:
+                attn_out = F.scaled_dot_product_attention(q, k_exp, v_exp, attn_mask=attn_mask)
+            elif L > 1:
+                past_len = k_prev.size(2)
+                q_pos = torch.arange(past_len, past_len + L, device=x.device)
+                k_pos = torch.arange(past_len + L, device=x.device)
+                eff_mask = (
+                    (k_pos // self.block_size).unsqueeze(0) <= (q_pos // self.block_size).unsqueeze(1)
+                ).unsqueeze(0).unsqueeze(0)
+                attn_out = F.scaled_dot_product_attention(q, k_exp, v_exp, attn_mask=eff_mask)
+            else:
+                attn_out = F.scaled_dot_product_attention(q, k_exp, v_exp, is_causal=False)
         else:
             eff_mask = attn_mask if attn_mask is not None else self._get_block_mask(L, x.device)
             attn_out = F.scaled_dot_product_attention(q, k_exp, v_exp, attn_mask=eff_mask)

@@ -82,7 +82,8 @@ typedef struct {
     int max_in_dim;
     int max_out_dim;
     float* x;              // [max_batch_seq * d_model]
-    float* x_norm;         // [max_batch_seq * max_in_dim]
+    float* h_norm;         // [max_batch_seq * d_model] (salida de attn_norm / ffn_norm)
+    float* x_norm;         // [max_batch_seq * max_in_dim] (exclusivo para sub_ln)
     int8_t* q_x;           // [max_batch_seq * max_in_dim]
     float* scale_x;        // [max_batch_seq]
     int32_t* acc_int32;    // [max_batch_seq * max_out_dim]
@@ -96,6 +97,7 @@ typedef struct {
     float* ffn_hidden;     // [max_batch_seq * d_ff]
     // Buffers scratchpad dedicados
     float* c_kv_tmp;       // [max_batch_seq * kv_lora_rank]
+    float* c_kv_tmp_single;// [kv_lora_rank] (scratchpad sin VLA para atencion)
     float* k_pe_tmp;       // [max_batch_seq * qk_rope_head_dim]
     float* attn_out;       // [max_batch_seq * d_model]
     float* ffn_out;        // [max_batch_seq * d_model]
@@ -141,6 +143,8 @@ int trace_lm_sample(
 // Getters ABI para ctypes
 int trace_lm_get_pread_calls(const TraceLMModel* model);
 int trace_lm_get_used_odirect(const TraceLMModel* model);
+const TraceLMConfig* trace_lm_get_config(const TraceLMModel* model);
+int trace_lm_get_vocab_size(const TraceLMModel* model);
 
 #ifdef __cplusplus
 }

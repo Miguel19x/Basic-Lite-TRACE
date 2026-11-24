@@ -4,17 +4,17 @@
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
 # SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
-import random
-from trace.layers.abacus import AbacusEmbedding
-from trace.layers.bitlinear import BitLinear
-from trace.layers.norm import RMSNorm
-from trace.modules.attention import build_target_unified_mask
-from trace.modules.resident_core import SharedResidentTernaryCore
 from typing import Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from trace.layers.abacus import AbacusEmbedding
+from trace.layers.bitlinear import BitLinear
+from trace.layers.norm import RMSNorm
+from trace.modules.attention import build_target_unified_mask
+from trace.modules.resident_core import SharedResidentTernaryCore
 
 
 class TRACECausalModel(nn.Module):
@@ -115,7 +115,8 @@ class TRACECausalModel(nn.Module):
         non_pad_mask = (x_t != self.cfg.pad_token_id)
 
         # Recorte dinámico de padding al múltiplo de block_size más cercano
-        max_valid = int(non_pad_mask.sum(dim=1).max().item())
+        pos = torch.arange(1, L + 1, device=x_t.device).unsqueeze(0)
+        max_valid = int((non_pad_mask.long() * pos).max().item())
         bs = self.cfg.block_size
         L_trim = min(L, max(bs, ((max_valid + bs - 1) // bs) * bs))
 
@@ -256,7 +257,7 @@ class TRACECausalModel(nn.Module):
             pms_r = pms_spans[b]
 
             # Scheduled Sampling: Usar Ground Truth con prob p, o predicción propia con prob (1-p)
-            use_gt = (random.random() < scheduled_sampling_p) if self.training else False
+            use_gt = (torch.rand(1, device=device).item() < scheduled_sampling_p) if self.training else False
             if use_gt:
                 x_stage2[b, pw_r[0]:pw_r[1]] = x_0[b, pw_r[0]:pw_r[1]]
                 x_stage2[b, pms_r[0]:pms_r[1]] = x_0[b, pms_r[0]:pms_r[1]]
@@ -291,7 +292,7 @@ class TRACECausalModel(nn.Module):
 
         x_tens = x_stage2.clone()
         for b in range(B):
-            u_gt = (random.random() < scheduled_sampling_p) if self.training else False
+            u_gt = (torch.rand(1, device=device).item() < scheduled_sampling_p) if self.training else False
             for r_span in (watt_spans[b], ms_spans[b]):
                 u_idx = r_span[0] + 2
                 x_tens[b, u_idx] = x_0[b, u_idx] if u_gt else preds_units[b, u_idx]
@@ -320,7 +321,7 @@ class TRACECausalModel(nn.Module):
 
         x_hundreds = x_tens.clone()
         for b in range(B):
-            t_gt = (random.random() < scheduled_sampling_p) if self.training else False
+            t_gt = (torch.rand(1, device=device).item() < scheduled_sampling_p) if self.training else False
             for r_span in (watt_spans[b], ms_spans[b]):
                 t_idx = r_span[0] + 1
                 x_hundreds[b, t_idx] = x_0[b, t_idx] if t_gt else preds_tens[b, t_idx]
@@ -380,6 +381,11 @@ class TRACECausalModel(nn.Module):
         # Construir plantilla de ancho fijo con scratchpad
         # pw: ???\npms: ???\nwatt: ???\nms: ???\n
         template_target = b"pw: ???\npms: ???\nwatt: ???\nms: ???\n"
+        required_len = 1 + len(prompt_bytes) + len(template_target) + 1
+        if required_len > self.cfg.max_seq_len:
+            raise ValueError(
+                f"Prompt + plantilla ({required_len} tokens) excede max_seq_len ({self.cfg.max_seq_len})"
+            )
         full_bytes = [self.cfg.bos_token_id] + list(prompt_bytes) + list(template_target) + [self.cfg.eos_token_id]
         prompt_len = 1 + len(prompt_bytes)
 
@@ -452,12 +458,15 @@ class TRACECausalModel(nn.Module):
         pred_ms_tokens = torch.stack([pred_ms_h, pred_ms_t, pred_ms_u])
 
         # Decodificación final de caracteres ASCII
-        pw_str = "".join(chr(int(t)) for t in actual_pw_tokens)
-        pms_str = "".join(chr(int(t)) for t in actual_pms_tokens)
-        pred_pw_raw = "".join(chr(int(t)) for t in pred_pw_tokens)
-        pred_pms_raw = "".join(chr(int(t)) for t in pred_pms_tokens)
-        watt_str = "".join(chr(int(t)) for t in pred_watt_tokens)
-        ms_str = "".join(chr(int(t)) for t in pred_ms_tokens)
+        def _decode_ascii(tokens: torch.Tensor) -> str:
+            return "".join(chr(int(t)) if 0 <= int(t) < 128 else "?" for t in tokens)
+
+        pw_str = _decode_ascii(actual_pw_tokens)
+        pms_str = _decode_ascii(actual_pms_tokens)
+        pred_pw_raw = _decode_ascii(pred_pw_tokens)
+        pred_pms_raw = _decode_ascii(pred_pms_tokens)
+        watt_str = _decode_ascii(pred_watt_tokens)
+        ms_str = _decode_ascii(pred_ms_tokens)
 
         full_output_str = f"pw: {pw_str}\npms: {pms_str}\nwatt: {watt_str}\nms: {ms_str}\n"
 

@@ -16,11 +16,11 @@ Suite de Validación y Contratos Arquitectónicos para TRACELanguageModel (Hito 
 8. Paridad exacta de generate(temperature=0.0) vs decodificación greedy paso a paso sin caché.
 """
 
+import torch
+
 from trace.layers.bitlinear import BitLinear
 from trace.lm.config import TRACELMConfig
 from trace.lm.model import TRACELanguageModel, TRACELMBlock
-
-import torch
 
 
 def test_tied_embeddings_and_bitlinear_projections():
@@ -99,7 +99,7 @@ def test_prefix_caching_and_incremental_decoding():
 
 
 def test_quantize_kv_int8():
-    """Verifica que el modo quantize_kv_int8=True opere de forma estable."""
+    """Verifica que el modo quantize_kv_int8=True aplique cuantización real y opere de forma estable."""
     torch.manual_seed(42)
     cfg = TRACELMConfig(n_layers=2, max_seq_len=64)
     model = TRACELanguageModel(cfg).eval()
@@ -110,20 +110,27 @@ def test_quantize_kv_int8():
         logits_int8, _, _ = model(x, quantize_kv_int8=True)
 
     assert torch.isfinite(logits_int8).all(), "Logits INT8 contienen NaN o Inf"
-    diff = (logits_fp32 - logits_int8).abs().mean().item()
-    assert diff < 0.25, f"Discrepancia excesiva en cuantización INT8 de KV: {diff:.4f}"
-    print(f"✓ Cuantización simétrica INT8 de KV cache verificada con finitud y delta acotado ({diff:.4f}).")
+    abs_diff = (logits_fp32 - logits_int8).abs()
+    mean_diff = abs_diff.mean().item()
+    max_diff = abs_diff.max().item()
+    assert max_diff > 0.0, "quantize_kv_int8=True resultó en un no-op (max_diff == 0.0)."
+    assert mean_diff < 0.25, f"Discrepancia media excesiva en cuantización INT8 de KV: {mean_diff:.4f}"
+    assert max_diff < 1.0, f"Discrepancia máxima excesiva en cuantización INT8 de KV: {max_diff:.4f}"
+    print(
+        f"✓ Cuantización simétrica INT8 de KV cache verificada "
+        f"(mean_diff={mean_diff:.6f}, max_diff={max_diff:.6f})."
+    )
 
 
 def test_monotonic_loss_decrease_and_gradients():
-    """Verifica optimización con AdamW BitNet y gradientes finitos/no-nulos en capas clave."""
+    """Verifica optimización con AdamW BitNet y gradientes finitos/no-nulos en todas las proyecciones."""
     torch.manual_seed(42)
     cfg = TRACELMConfig(n_layers=2, d_model=128, n_heads=4, d_ff=256)
     model = TRACELanguageModel(cfg).train()
 
     optimizer = torch.optim.AdamW(
         model.configure_adamw_groups(bitlinear_weight_decay=0.0, weight_decay=0.01),
-        lr=1e-3
+        lr=1e-3,
     )
 
     x = torch.randint(0, cfg.vocab_size, (2, 16))
@@ -135,13 +142,19 @@ def test_monotonic_loss_decrease_and_gradients():
         _, loss, _ = model(x, targets=y)
         loss.backward()
 
-        # Verificación estricta de gradientes en capas clave
+        # Verificación estricta de gradientes en todas las proyecciones clave de atención y FFN
         if step == 0:
             for l_idx, layer in enumerate(model.layers):
                 for p_name, p in [
                     ("w_dkv", layer.attn.w_dkv.weight),
                     ("w_uk", layer.attn.w_uk.weight),
                     ("w_uv", layer.attn.w_uv.weight),
+                    ("w_q", layer.attn.w_q.weight),
+                    ("w_qr", layer.attn.w_qr.weight),
+                    ("w_kr", layer.attn.w_kr.weight),
+                    ("w_out", layer.attn.w_out.weight),
+                    ("ffn.up", layer.ffn.up.weight),
+                    ("ffn.down", layer.ffn.down.weight),
                 ]:
                     assert p.grad is not None, f"Gradiente None en {p_name} capa {l_idx}"
                     assert torch.isfinite(p.grad).all(), f"Gradiente no finito en {p_name} capa {l_idx}"
@@ -154,9 +167,11 @@ def test_monotonic_loss_decrease_and_gradients():
         optimizer.step()
         losses.append(loss.item())
 
-    assert losses[-1] < losses[0], f"La pérdida no decreció: inicial={losses[0]:.4f}, final={losses[-1]:.4f}"
-    print("✓ Gradientes finitos y no-nulos verificados en W_dkv, W_uk, W_uv y tok_emb.")
-    print(f"✓ Descenso monótono de pérdida verificado en 5 pasos: {losses[0]:.4f} -> {losses[-1]:.4f}")
+    assert all(losses[i + 1] < losses[i] for i in range(len(losses) - 1)), (
+        f"La pérdida no decreció de forma estrictamente monótona: {losses}"
+    )
+    print("✓ Gradientes finitos y no-nulos verificados en todas las proyecciones MLA, FFN y tok_emb.")
+    print(f"✓ Descenso estrictamente monótono de pérdida verificado en 5 pasos: {losses[0]:.4f} -> {losses[-1]:.4f}")
 
 
 def test_generate_greedy_equivalence():

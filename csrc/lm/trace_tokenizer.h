@@ -46,6 +46,10 @@ typedef struct {
     TraceMerge* merges;
     TraceMergeHashEntry* hash_table;
     TraceTokenPiece* pieces;
+    int pad_id;
+    int mask_id;
+    int bos_id;
+    int eos_id;
 } TraceTokenizer;
 
 size_t trace_tokenizer_sizeof(void);

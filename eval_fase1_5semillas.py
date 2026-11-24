@@ -22,7 +22,6 @@ import json
 import os
 import random
 import time
-from trace.models.causal import TRACECausalModel
 from typing import Any
 
 import numpy as np
@@ -31,6 +30,7 @@ import torch
 from config import HybridConfig
 from data import ProceduralCompositionalDataset, parse_fixed_scratchpad
 from eval import compute_ece, evaluate_causal
+from trace.models.causal import TRACECausalModel
 
 # Concurrencia obligatoria en CPU i3-1115G4 (§2.3)
 torch.set_num_threads(2)
@@ -251,10 +251,15 @@ def main():
         assert os.path.exists(path), f"Checkpoint no encontrado: {path}"
         print(f"---> Evaluando Semilla {s} ({args.variant}) desde: {path}")
         t0 = time.time()
-        ckpt = torch.load(path, map_location=device, weights_only=False)
-        
-        ckpt_cfg = ckpt.get("cfg")
-        if ckpt_cfg is not None:
+        if hasattr(torch.serialization, "safe_globals"):
+            with torch.serialization.safe_globals([HybridConfig]):
+                ckpt = torch.load(path, map_location=device, weights_only=True)
+        else:
+            ckpt = torch.load(path, map_location=device, weights_only=True)
+
+        raw_cfg = ckpt.get("cfg")
+        if raw_cfg is not None:
+            ckpt_cfg = HybridConfig(**raw_cfg) if isinstance(raw_cfg, dict) else raw_cfg
             ckpt_cfg.device = "cpu"
             ckpt_cfg.cpu_threads = 2
             model = TRACECausalModel(ckpt_cfg).to(device)

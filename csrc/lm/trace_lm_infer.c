@@ -50,25 +50,28 @@ TraceLMWorkspace* trace_lm_workspace_create(const TraceLMConfig* cfg, int max_ba
         } \
     } while(0)
 
-    ALLOC_MEM(ws->x, (size_t)max_batch_seq * d_model * sizeof(float));
-    ALLOC_MEM(ws->x_norm, (size_t)max_batch_seq * max_in_dim * sizeof(float));
-    ALLOC_MEM(ws->q_x, (size_t)max_batch_seq * max_in_dim * sizeof(int8_t));
+    ALLOC_MEM(ws->x, (size_t)max_batch_seq * (size_t)d_model * sizeof(float));
+    ALLOC_MEM(ws->h_norm, (size_t)max_batch_seq * (size_t)d_model * sizeof(float));
+    ALLOC_MEM(ws->x_norm, (size_t)max_batch_seq * (size_t)max_in_dim * sizeof(float));
+    ALLOC_MEM(ws->q_x, (size_t)max_batch_seq * (size_t)max_in_dim * sizeof(int8_t));
     ALLOC_MEM(ws->scale_x, (size_t)max_batch_seq * sizeof(float));
-    ALLOC_MEM(ws->acc_int32, (size_t)max_batch_seq * max_out_dim * sizeof(int32_t));
+    ALLOC_MEM(ws->acc_int32, (size_t)max_batch_seq * (size_t)max_out_dim * sizeof(int32_t));
 
-    ALLOC_MEM(ws->q_c, (size_t)max_batch_seq * q_nope_dim * sizeof(float));
-    ALLOC_MEM(ws->q_pe, (size_t)max_batch_seq * q_rope_dim * sizeof(float));
-    ALLOC_MEM(ws->q_c_absorbed, (size_t)max_batch_seq * n_heads * kv_lora_rank * sizeof(float));
-    ALLOC_MEM(ws->scores, (size_t)n_heads * max_batch_seq * cfg->max_seq_len * sizeof(float));
-    ALLOC_MEM(ws->attn_probs, (size_t)n_heads * max_batch_seq * cfg->max_seq_len * sizeof(float));
-    ALLOC_MEM(ws->o_latent, (size_t)n_heads * max_batch_seq * kv_lora_rank * sizeof(float));
-    ALLOC_MEM(ws->o_heads, (size_t)max_batch_seq * v_dim * sizeof(float));
-    ALLOC_MEM(ws->ffn_hidden, (size_t)max_batch_seq * d_ff * sizeof(float));
+    ALLOC_MEM(ws->q_c, (size_t)max_batch_seq * (size_t)q_nope_dim * sizeof(float));
+    ALLOC_MEM(ws->q_pe, (size_t)max_batch_seq * (size_t)q_rope_dim * sizeof(float));
+    ALLOC_MEM(ws->q_c_absorbed, (size_t)max_batch_seq * (size_t)n_heads * (size_t)kv_lora_rank * sizeof(float));
+    ALLOC_MEM(ws->scores, (size_t)n_heads * (size_t)max_batch_seq * (size_t)cfg->max_seq_len * sizeof(float));
+    ALLOC_MEM(ws->attn_probs, (size_t)n_heads * (size_t)max_batch_seq * (size_t)cfg->max_seq_len * sizeof(float));
+    ALLOC_MEM(ws->o_latent, (size_t)n_heads * (size_t)max_batch_seq * (size_t)kv_lora_rank * sizeof(float));
+    ALLOC_MEM(ws->o_heads, (size_t)max_batch_seq * (size_t)v_dim * sizeof(float));
+    ALLOC_MEM(ws->ffn_hidden, (size_t)max_batch_seq * (size_t)d_ff * sizeof(float));
 
-    ALLOC_MEM(ws->c_kv_tmp, (size_t)max_batch_seq * kv_lora_rank * sizeof(float));
-    ALLOC_MEM(ws->k_pe_tmp, (size_t)max_batch_seq * cfg->qk_rope_head_dim * sizeof(float));
-    ALLOC_MEM(ws->attn_out, (size_t)max_batch_seq * d_model * sizeof(float));
-    ALLOC_MEM(ws->ffn_out, (size_t)max_batch_seq * d_model * sizeof(float));
+    ALLOC_MEM(ws->c_kv_tmp, (size_t)max_batch_seq * (size_t)kv_lora_rank * sizeof(float));
+    ALLOC_MEM(ws->c_kv_tmp_single, (size_t)kv_lora_rank * sizeof(float));
+    ALLOC_MEM(ws->k_pe_tmp, (size_t)max_batch_seq * (size_t)cfg->qk_rope_head_dim * sizeof(float));
+    ALLOC_MEM(ws->attn_out, (size_t)max_batch_seq * (size_t)d_model * sizeof(float));
+    ALLOC_MEM(ws->ffn_out, (size_t)max_batch_seq * (size_t)d_model * sizeof(float));
+    #undef ALLOC_MEM
 
     return ws;
 }
@@ -76,6 +79,7 @@ TraceLMWorkspace* trace_lm_workspace_create(const TraceLMConfig* cfg, int max_ba
 void trace_lm_workspace_free(TraceLMWorkspace* ws) {
     if (!ws) return;
     if (ws->x) free(ws->x);
+    if (ws->h_norm) free(ws->h_norm);
     if (ws->x_norm) free(ws->x_norm);
     if (ws->q_x) free(ws->q_x);
     if (ws->scale_x) free(ws->scale_x);
@@ -89,6 +93,7 @@ void trace_lm_workspace_free(TraceLMWorkspace* ws) {
     if (ws->o_heads) free(ws->o_heads);
     if (ws->ffn_hidden) free(ws->ffn_hidden);
     if (ws->c_kv_tmp) free(ws->c_kv_tmp);
+    if (ws->c_kv_tmp_single) free(ws->c_kv_tmp_single);
     if (ws->k_pe_tmp) free(ws->k_pe_tmp);
     if (ws->attn_out) free(ws->attn_out);
     if (ws->ffn_out) free(ws->ffn_out);
@@ -124,10 +129,11 @@ static void paged_linear_forward_act_int8(
         float scale_inv = 127.0f / amax;
         ws->scale_x[m] = scale;
 
-        int8_t* qrow = ws->q_x + m * in_f;
+        int8_t* qrow = ws->q_x + (size_t)m * (size_t)in_f;
         for (int i = 0; i < in_f; ++i) {
-            float q = roundf(row[i] * scale_inv);
-            if (q > 127.0f) q = 127.0f;
+            float q = nearbyintf(row[i] * scale_inv);
+            if (!isfinite(q)) q = 0.0f;
+            else if (q > 127.0f) q = 127.0f;
             else if (q < -127.0f) q = -127.0f;
             qrow[i] = (int8_t)q;
         }
@@ -178,9 +184,9 @@ int trace_lm_forward(
     TraceLMWorkspace* ws
 ) {
     // 1. Validaciones obligatorias de seguridad
-    if (!model || !kv || !ws || !out_logits) return -1;
+    if (!model || !kv || !ws || !out_logits || !input_tokens) return -1;
     if (num_tokens <= 0) return 0;
-    if (num_tokens > kv->max_seq_len) return -2;
+    if (num_tokens > kv->max_seq_len || num_tokens > model->cfg.max_seq_len) return -2;
 
     // 2. Prefix Caching real sin casos borde
     int common_pfx = trace_lm_kv_find_common_prefix(kv, input_tokens, num_tokens);
@@ -207,46 +213,46 @@ int trace_lm_forward(
     for (int t = 0; t < S; ++t) {
         int tok = input_tokens[past_len + t];
         if (tok < 0 || tok >= model->cfg.vocab_size) tok = model->cfg.pad_token_id;
-        const float* emb_src = model->tok_emb + tok * d_model;
-        memcpy(ws->x + t * d_model, emb_src, sizeof(float) * d_model);
+        const float* emb_src = model->tok_emb + (size_t)tok * (size_t)d_model;
+        memcpy(ws->x + (size_t)t * (size_t)d_model, emb_src, sizeof(float) * (size_t)d_model);
     }
 
     // 4. Bucle sobre capas Transformer
     for (int l = 0; l < model->cfg.n_layers; ++l) {
         TraceLMLayer* layer = &model->layers[l];
 
-        // 4.1. RMSNorm previo a atencion
+        // 4.1. RMSNorm previo a atencion (escribe en h_norm, preservando x_norm para sub_ln)
         for (int t = 0; t < S; ++t) {
-            rms_norm(ws->x + t * d_model, layer->attn_norm_w, ws->x_norm + t * d_model, d_model, eps);
+            rms_norm(ws->x + (size_t)t * (size_t)d_model, layer->attn_norm_w, ws->h_norm + (size_t)t * (size_t)d_model, d_model, eps);
         }
 
         // 4.2. Proyeccion KV latente: w_dkv
-        paged_linear_forward_act_int8(ws->x_norm, &layer->w_dkv, ws->c_kv_tmp, S, ws, eps);
+        paged_linear_forward_act_int8(ws->h_norm, &layer->w_dkv, ws->c_kv_tmp, S, ws, eps);
 
         // 4.3. Normalizacion de cuello de botella: kv_norm
         for (int t = 0; t < S; ++t) {
-            rms_norm(ws->c_kv_tmp + t * kv_lora_rank, layer->kv_norm_w, ws->c_kv_tmp + t * kv_lora_rank, kv_lora_rank, eps);
+            rms_norm(ws->c_kv_tmp + (size_t)t * (size_t)kv_lora_rank, layer->kv_norm_w, ws->c_kv_tmp + (size_t)t * (size_t)kv_lora_rank, kv_lora_rank, eps);
         }
 
         // 4.4. Proyeccion de clave rotacional: w_kr
-        paged_linear_forward_act_int8(ws->x_norm, &layer->w_kr, ws->k_pe_tmp, S, ws, eps);
+        paged_linear_forward_act_int8(ws->h_norm, &layer->w_kr, ws->k_pe_tmp, S, ws, eps);
         for (int t = 0; t < S; ++t) {
-            apply_rope_c(ws->k_pe_tmp + t * qk_rope_head_dim, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
+            apply_rope_c(ws->k_pe_tmp + (size_t)t * (size_t)qk_rope_head_dim, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
         }
 
         // 4.5. Guardar c_kv y k_pe en el KV Cache para cada token nuevo
         for (int t = 0; t < S; ++t) {
-            trace_lm_kv_store(kv, l, past_len + t, ws->c_kv_tmp + t * kv_lora_rank, ws->k_pe_tmp + t * qk_rope_head_dim);
+            trace_lm_kv_store(kv, l, past_len + t, ws->c_kv_tmp + (size_t)t * (size_t)kv_lora_rank, ws->k_pe_tmp + (size_t)t * (size_t)qk_rope_head_dim);
         }
 
         // 4.6. Proyecciones de consulta: w_q y w_qr
-        paged_linear_forward_act_int8(ws->x_norm, &layer->w_q, ws->q_c, S, ws, eps);
-        paged_linear_forward_act_int8(ws->x_norm, &layer->w_qr, ws->q_pe, S, ws, eps);
+        paged_linear_forward_act_int8(ws->h_norm, &layer->w_q, ws->q_c, S, ws, eps);
+        paged_linear_forward_act_int8(ws->h_norm, &layer->w_qr, ws->q_pe, S, ws, eps);
 
         // Aplicar RoPE sobre q_pe
         for (int t = 0; t < S; ++t) {
             for (int h = 0; h < n_heads; ++h) {
-                float* q_pe_h = ws->q_pe + (t * n_heads + h) * qk_rope_head_dim;
+                float* q_pe_h = ws->q_pe + (size_t)(t * n_heads + h) * (size_t)qk_rope_head_dim;
                 apply_rope_c(q_pe_h, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
             }
         }
@@ -255,18 +261,18 @@ int trace_lm_forward(
         paged_absorb_uk_f32(ws->q_c, layer->w_uk.page_ptrs, layer->w_uk.num_pages, layer->w_uk.scale, ws->q_c_absorbed, n_heads, qk_nope_head_dim, kv_lora_rank, S);
 
         // 4.8. Atencion Causal Multi-Head Latente
+        float* c_kv_s = ws->c_kv_tmp_single;
         for (int t = 0; t < S; ++t) {
             int curr_pos = past_len + t;
             int total_len = curr_pos + 1;
 
             for (int h = 0; h < n_heads; ++h) {
-                const float* q_c_abs_h = ws->q_c_absorbed + (t * n_heads + h) * kv_lora_rank;
-                const float* q_pe_h = ws->q_pe + (t * n_heads + h) * qk_rope_head_dim;
-                float* scores_h = ws->scores + (h * S + t) * model->cfg.max_seq_len;
+                const float* q_c_abs_h = ws->q_c_absorbed + (size_t)(t * n_heads + h) * (size_t)kv_lora_rank;
+                const float* q_pe_h = ws->q_pe + (size_t)(t * n_heads + h) * (size_t)qk_rope_head_dim;
+                float* scores_h = ws->scores + (size_t)(h * S + t) * (size_t)model->cfg.max_seq_len;
 
-                float max_sc = -1e30f;
+                float max_sc = -INFINITY;
                 for (int s = 0; s < total_len; ++s) {
-                    float c_kv_s[kv_lora_rank];
                     trace_lm_kv_get_c_kv(kv, l, s, c_kv_s);
                     const float* k_pe_s = trace_lm_kv_get_k_pe(kv, l, s);
 
@@ -279,7 +285,7 @@ int trace_lm_forward(
 
                 // Softmax estable
                 float sum_exp = 0.0f;
-                float* probs_h = ws->attn_probs + (h * S + t) * model->cfg.max_seq_len;
+                float* probs_h = ws->attn_probs + (size_t)(h * S + t) * (size_t)model->cfg.max_seq_len;
                 for (int s = 0; s < total_len; ++s) {
                     float p = expf(scores_h[s] - max_sc);
                     probs_h[s] = p;
@@ -291,12 +297,11 @@ int trace_lm_forward(
                 }
 
                 // Agregacion en espacio latente: o_latent = sum(probs * c_kv)
-                float* o_lat_h = ws->o_latent + (t * n_heads + h) * kv_lora_rank;
-                memset(o_lat_h, 0, sizeof(float) * kv_lora_rank);
+                float* o_lat_h = ws->o_latent + (size_t)(t * n_heads + h) * (size_t)kv_lora_rank;
+                memset(o_lat_h, 0, sizeof(float) * (size_t)kv_lora_rank);
                 for (int s = 0; s < total_len; ++s) {
                     float p = probs_h[s];
                     if (p == 0.0f) continue;
-                    float c_kv_s[kv_lora_rank];
                     trace_lm_kv_get_c_kv(kv, l, s, c_kv_s);
                     trace_axpy_f32(o_lat_h, p, c_kv_s, kv_lora_rank);
                 }
@@ -316,9 +321,9 @@ int trace_lm_forward(
 
         // 4.11. FFN: RMSNorm -> ffn_up -> Squared-ReLU -> ffn_down
         for (int t = 0; t < S; ++t) {
-            rms_norm(ws->x + t * d_model, layer->ffn_norm_w, ws->x_norm + t * d_model, d_model, eps);
+            rms_norm(ws->x + (size_t)t * (size_t)d_model, layer->ffn_norm_w, ws->h_norm + (size_t)t * (size_t)d_model, d_model, eps);
         }
-        paged_linear_forward_act_int8(ws->x_norm, &layer->ffn_up, ws->ffn_hidden, S, ws, eps);
+        paged_linear_forward_act_int8(ws->h_norm, &layer->ffn_up, ws->ffn_hidden, S, ws, eps);
 
         // Activacion Squared-ReLU: relu(x)^2
         for (int i = 0; i < S * d_ff; ++i) {
@@ -337,25 +342,25 @@ int trace_lm_forward(
 
     // 5. Final RMSNorm
     for (int t = 0; t < S; ++t) {
-        rms_norm(ws->x + t * d_model, model->final_norm_w, ws->x_norm + t * d_model, d_model, eps);
+        rms_norm(ws->x + (size_t)t * (size_t)d_model, model->final_norm_w, ws->x_norm + (size_t)t * (size_t)d_model, d_model, eps);
     }
 
     // 6. Proyeccion de salida con tied embeddings
     int vocab_size = model->cfg.vocab_size;
     if (last_token_only) {
         // Optimizado para CLI / generacion: computa unicamente el ultimo token (S - 1)
-        const float* x_last = ws->x_norm + (S - 1) * d_model;
+        const float* x_last = ws->x_norm + (size_t)(S - 1) * (size_t)d_model;
         for (int v = 0; v < vocab_size; ++v) {
-            const float* emb_v = model->lm_head_w + v * d_model;
+            const float* emb_v = model->lm_head_w + (size_t)v * (size_t)d_model;
             out_logits[v] = trace_dot_f32(x_last, emb_v, d_model);
         }
     } else {
         // Escribe logits para todos los S tokens nuevos
         for (int t = 0; t < S; ++t) {
-            const float* x_t = ws->x_norm + t * d_model;
-            float* logits_t = out_logits + t * vocab_size;
+            const float* x_t = ws->x_norm + (size_t)t * (size_t)d_model;
+            float* logits_t = out_logits + (size_t)t * (size_t)vocab_size;
             for (int v = 0; v < vocab_size; ++v) {
-                const float* emb_v = model->lm_head_w + v * d_model;
+                const float* emb_v = model->lm_head_w + (size_t)v * (size_t)d_model;
                 logits_t[v] = trace_dot_f32(x_t, emb_v, d_model);
             }
         }
@@ -374,7 +379,8 @@ void trace_lm_apply_repetition_penalty(
     int num_tokens,
     float penalty
 ) {
-    if (!logits || vocab_size <= 0 || !tokens || num_tokens <= 0 || penalty <= 1.0f) {
+    if (!logits || vocab_size <= 0 || !tokens || num_tokens <= 0 ||
+        !(penalty > 1.0f) || !isfinite(penalty)) {
         return;
     }
 
@@ -415,10 +421,17 @@ typedef struct {
 } TraceTokenProb;
 
 static int compare_token_probs(const void* a, const void* b) {
-    float pa = ((const TraceTokenProb*)a)->prob;
-    float pb = ((const TraceTokenProb*)b)->prob;
+    const TraceTokenProb* ta = (const TraceTokenProb*)a;
+    const TraceTokenProb* tb = (const TraceTokenProb*)b;
+    float pa = ta->prob;
+    float pb = tb->prob;
+    int na = isnan(pa);
+    int nb = isnan(pb);
+    if (na != nb) return na ? 1 : -1;
     if (pb > pa) return 1;
     if (pb < pa) return -1;
+    if (ta->id < tb->id) return -1;
+    if (ta->id > tb->id) return 1;
     return 0;
 }
 
@@ -434,7 +447,7 @@ static inline uint64_t xorshift64(uint64_t* state) {
 static inline float rand_uniform(uint64_t* rng_state) {
     if (!rng_state) return 0.5f;
     uint64_t r = xorshift64(rng_state);
-    return (float)((double)(r >> 11) * (1.0 / 9007199254740992.0));
+    return (float)(r >> 40) * (1.0f / 16777216.0f);
 }
 
 int trace_lm_sample(
@@ -445,14 +458,15 @@ int trace_lm_sample(
     float top_p,
     uint64_t* rng_state
 ) {
-    if (temperature <= 0.0f) {
+    if (!logits || vocab_size <= 0) return 0;
+    if (!(temperature > 0.0f) || !isfinite(temperature)) {
         return trace_lm_sample_greedy(logits, vocab_size);
     }
 
-    TraceTokenProb* items = (TraceTokenProb*)malloc(sizeof(TraceTokenProb) * vocab_size);
+    TraceTokenProb* items = (TraceTokenProb*)malloc(sizeof(TraceTokenProb) * (size_t)vocab_size);
     if (!items) return trace_lm_sample_greedy(logits, vocab_size);
 
-    float max_sc = -1e30f;
+    float max_sc = -INFINITY;
     for (int v = 0; v < vocab_size; ++v) {
         float scaled = logits[v] / temperature;
         if (scaled > max_sc) max_sc = scaled;
@@ -505,7 +519,7 @@ int trace_lm_sample(
     // Muestreo uniforme en [0, 1)
     float coin = rand_uniform(rng_state);
     float cum = 0.0f;
-    int sampled_tok = items[0].id;
+    int sampled_tok = items[n_candidates - 1].id;
     for (int i = 0; i < n_candidates; ++i) {
         cum += items[i].prob * renorm;
         if (coin <= cum) {

@@ -9,19 +9,10 @@
 #define _GNU_SOURCE
 #include "trace_infer.h"
 #include "trace_math.h"
+#include "paged_dispatch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-void paged_direct_matmul_fast_c_multi(
-    const int8_t* x,
-    const uint8_t* const* page_blobs,
-    int64_t num_pages,
-    int32_t* out,
-    int64_t M,
-    int64_t K,
-    int64_t total_out_features
-);
 
 static void paged_linear_forward(
     const TracePagedLinear* layer,
@@ -36,12 +27,21 @@ static void paged_linear_forward(
     int64_t out_f = layer->out_features;
     float q_max = 127.0f;
 
-    float* x_norm = ws ? ws->x_norm : (float*)malloc(M * in_f * sizeof(float));
-    int8_t* q_x = ws ? ws->q_x : (int8_t*)malloc(M * in_f * sizeof(int8_t));
-    int32_t* acc_int32 = ws ? ws->acc_int32 : (int32_t*)malloc(M * out_f * sizeof(int32_t));
-    float* scale_x = ws ? ws->scale_x : (float*)malloc(M * sizeof(float));
+    float* x_norm = ws ? ws->x_norm : (float*)malloc((size_t)M * (size_t)in_f * sizeof(float));
+    int8_t* q_x = ws ? ws->q_x : (int8_t*)malloc((size_t)M * (size_t)in_f * sizeof(int8_t));
+    int32_t* acc_int32 = ws ? ws->acc_int32 : (int32_t*)malloc((size_t)M * (size_t)out_f * sizeof(int32_t));
+    float* scale_x = ws ? ws->scale_x : (float*)malloc((size_t)M * sizeof(float));
+    if (!x_norm || !q_x || !acc_int32 || !scale_x) {
+        if (!ws) {
+            free(x_norm);
+            free(q_x);
+            free(acc_int32);
+            free(scale_x);
+        }
+        return;
+    }
 
-    #pragma omp parallel for num_threads(2) schedule(static) if (M >= 32)
+    #pragma omp parallel for schedule(static) if (M >= 32)
     for (int64_t m = 0; m < M; ++m) {
         rms_norm(x + m * in_f, layer->sub_ln_w, x_norm + m * in_f, (int)in_f, eps);
 
@@ -57,8 +57,9 @@ static void paged_linear_forward(
         float inv_s = q_max / amax;
         for (int64_t k_blk = 0; k_blk < in_f; ++k_blk) {
             float v = nearbyintf(xn_ptr[k_blk] * inv_s);
-            if (v > 127.0f) v = 127.0f;
-            if (v < -127.0f) v = -127.0f;
+            if (!isfinite(v)) v = 0.0f;
+            else if (v > 127.0f) v = 127.0f;
+            else if (v < -127.0f) v = -127.0f;
             q_x[m * in_f + k_blk] = (int8_t)v;
         }
     }
@@ -174,7 +175,7 @@ static void run_gqa_attention(
     int t_end = (prompt_len > 0) ? (prompt_len + 35) : L;
     if (t_end > L) t_end = L;
 
-    #pragma omp parallel for num_threads(2) schedule(static)
+    #pragma omp parallel for schedule(static)
     for (int h = 0; h < 4; ++h) {
         int kv_h = h / 2;
         for (int i = 0; i < L; ++i) {
@@ -196,7 +197,7 @@ static void run_gqa_attention(
                     continue;
                 }
                 const float* k_vec = k + j * 96 + kv_h * 48;
-                float dot = avx2_dot_product_f32(q_vec, k_vec, 48);
+                float dot = trace_dot_f32(q_vec, k_vec, 48);
                 scores[j] = dot * scale_attn;
                 if (scores[j] > max_s) max_s = scores[j];
             }
@@ -349,7 +350,17 @@ void trace_forward_backbone_lazy(
     int num_targets,
     float* out_logits
 ) {
+    if (!model || !token_ids || !out_logits) return;
     if (seq_len <= 0 || seq_len > model->cfg.max_seq_len) return;
+    if (stage_id < 0 || stage_id >= 4) return;
+    for (int i = 0; i < seq_len; ++i) {
+        if (token_ids[i] < 0 || token_ids[i] >= model->cfg.vocab_size) return;
+    }
+    if (target_indices != NULL && num_targets > 0) {
+        for (int t = 0; t < num_targets; ++t) {
+            if (target_indices[t] < 0 || target_indices[t] >= seq_len) return;
+        }
+    }
 
     int L = seq_len;
     int D = model->cfg.d_model;
@@ -425,7 +436,7 @@ void trace_forward_backbone_lazy(
         for (int i = 0; i < L; ++i) {
             const float* act_row = normed_y + i * D;
             for (int v = 0; v < V; ++v) {
-                out_logits[i * V + v] = avx2_dot_product_f32(act_row, model->lm_head_w + v * D, D);
+                out_logits[i * V + v] = trace_dot_f32(act_row, model->lm_head_w + v * D, D);
             }
         }
     } else {
@@ -433,7 +444,7 @@ void trace_forward_backbone_lazy(
             int i = target_indices[t];
             const float* act_row = normed_y + i * D;
             for (int v = 0; v < V; ++v) {
-                out_logits[t * V + v] = avx2_dot_product_f32(act_row, model->lm_head_w + v * D, D);
+                out_logits[t * V + v] = trace_dot_f32(act_row, model->lm_head_w + v * D, D);
             }
         }
     }
@@ -457,15 +468,21 @@ int trace_generate_causal_two_step(
     char* out_str,
     int max_out_len
 ) {
+    if (!model || !prompt_bytes || !out_str || max_out_len <= 0) return -1;
     int max_seq = model->cfg.max_seq_len;
+    const char* template_str = "pw: ???\npms: ???\nwatt: ???\nms: ???\n";
+    int t_len = (int)strlen(template_str);
+    if (prompt_len < 0 || max_seq > 160 || 1 + prompt_len + t_len + 1 > max_seq) {
+        out_str[0] = '\0';
+        return -1;
+    }
+
     int32_t seq[160];
     for (int i = 0; i < max_seq; ++i) seq[i] = model->cfg.pad_token_id;
 
     seq[0] = model->cfg.bos_token_id;
     for (int i = 0; i < prompt_len; ++i) seq[1 + i] = prompt_bytes[i];
 
-    const char* template_str = "pw: ???\npms: ???\nwatt: ???\nms: ???\n";
-    int t_len = (int)strlen(template_str);
     int p_end = 1 + prompt_len;
     for (int i = 0; i < t_len; ++i) seq[p_end + i] = (uint8_t)template_str[i];
     seq[p_end + t_len] = model->cfg.eos_token_id;

@@ -92,4 +92,4 @@ class HybridConfig:
     bitcos_export_path: str = "trace_paged_bitcos.bin"
 
     def __post_init__(self) -> None:
-        self.archive_context_enabled = self.enable_sqlite_context_l3
+        self.archive_context_enabled = self.enable_sqlite_context_l3 or self.archive_context_enabled

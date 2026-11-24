@@ -1,7 +1,7 @@
 CC ?= gcc
 ARCH := $(shell uname -m)
 
-CFLAGS ?= -O3 -ffp-contract=off -fopenmp -Wall -Wextra -Werror -I. -Icsrc
+CFLAGS ?= -O3 -ffp-contract=off -fopenmp -Wall -Wextra -Werror -Wvla -I. -Icsrc
 PIC_CFLAGS ?= $(CFLAGS) -fPIC
 EXE_CFLAGS ?= $(CFLAGS)
 AVX2_FLAGS = -mavx2 -mfma -DTRACE_ENABLE_AVX2
@@ -33,17 +33,17 @@ LM_HDRS = csrc/lm/trace_lm.h csrc/lm/trace_lm_kv.h $(HEADERS)
 
 PYTHON ?= $(shell if [ -f venv/bin/python ]; then echo venv/bin/python; else echo python3; fi)
 
-.PHONY: all clean test lint check
+.PHONY: all clean test lint check sanitizers
 
 all: $(TARGET) $(LIBTERNARY) $(RUNNER_LIB) $(RUNNER_BIN) $(TOKENIZER_LIB) $(LM_LIB) $(LM_BIN)
 
 csrc/paged_dispatch.o: csrc/paged_dispatch.c csrc/paged_dispatch.h
 	$(CC) $(PIC_CFLAGS) $(DISPATCH_DEFS) -c $< -o $@
 
-csrc/paged_gemm_scalar.o: csrc/paged_gemm_scalar.c csrc/paged_dispatch.h
+csrc/paged_gemm_scalar.o: csrc/paged_gemm_scalar.c csrc/paged_dispatch.h csrc/trace_infer.h
 	$(CC) $(PIC_CFLAGS) -c $< -o $@
 
-csrc/paged_gemm_avx2.o: csrc/paged_gemm_avx2.c csrc/paged_dispatch.h csrc/paged_unpack.h
+csrc/paged_gemm_avx2.o: csrc/paged_gemm_avx2.c csrc/paged_dispatch.h csrc/paged_unpack.h csrc/trace_infer.h
 	$(CC) $(PIC_CFLAGS) $(AVX2_FLAGS) -c $< -o $@
 
 csrc/trace_loader.o: csrc/trace_loader.c csrc/trace_infer.h
@@ -52,10 +52,10 @@ csrc/trace_loader.o: csrc/trace_loader.c csrc/trace_infer.h
 csrc/trace_causal.o: csrc/trace_causal.c $(HEADERS)
 	$(CC) $(PIC_CFLAGS) -c $< -o $@
 
-csrc/lm/trace_lm_loader.o: csrc/lm/trace_lm_loader.c csrc/lm/trace_lm.h
+csrc/lm/trace_lm_loader.o: csrc/lm/trace_lm_loader.c csrc/lm/trace_lm.h csrc/trace_infer.h
 	$(CC) $(PIC_CFLAGS) -c $< -o $@
 
-csrc/lm/trace_lm_kv.o: csrc/lm/trace_lm_kv.c csrc/lm/trace_lm_kv.h
+csrc/lm/trace_lm_kv.o: csrc/lm/trace_lm_kv.c csrc/lm/trace_lm_kv.h csrc/lm/trace_lm.h
 	$(CC) $(PIC_CFLAGS) -c $< -o $@
 
 csrc/lm/trace_lm_infer.o: csrc/lm/trace_lm_infer.c $(LM_HDRS)
@@ -84,12 +84,11 @@ $(LM_BIN): csrc/lm/trace_lm_cli.c $(LM_LIB) $(TOKENIZER_LIB) $(LM_HDRS) $(TOKENI
 	$(CC) $(EXE_CFLAGS) -o $@ csrc/lm/trace_lm_cli.c -L. -ltrace_lm -ltrace_tokenizer -lm -Wl,-rpath,'$$ORIGIN'
 
 test: all
-	PYTHONPATH=. $(PYTHON) tests/test_smoke.py
-	PYTHONPATH=. $(PYTHON) tests/test_avx2_kernel.py
-	PYTHONPATH=. $(PYTHON) tests/test_trace_infer.py
-	PYTHONPATH=. $(PYTHON) tests/test_trace_lm_infer.py
-	PYTHONPATH=. $(PYTHON) tests/test_parity_fase3.py
-	PYTHONPATH=. $(PYTHON) tests/test_parity_temporal.py
+	PYTHONPATH=. $(PYTHON) -m pytest tests/
+
+sanitizers:
+	$(MAKE) clean
+	$(MAKE) CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -ffp-contract=off -fopenmp -Wall -Wextra -Werror -Wvla -I. -Icsrc" all
 
 lint:
 	@if [ -f venv/bin/ruff ]; then venv/bin/ruff check .; else echo "ruff no instalado en venv, omitiendo linting"; fi

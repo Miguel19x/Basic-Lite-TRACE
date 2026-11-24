@@ -10,12 +10,13 @@ import json
 import mmap
 import os
 import struct
-from trace.layers.bitlinear import BitLinear
 from typing import Any
 
 import numpy as np
 import torch
 import torch.nn as nn
+
+from trace.layers.bitlinear import BitLinear
 
 # Magic identificador para el formato de ejecución por páginas (Paged BitCOS v1)
 MAGIC_PBITCOS = b"PBITCOS1"
@@ -155,9 +156,17 @@ class PagedBitCOSSerializer:
             if isinstance(module, BitLinear):
                 # Extraer pesos cuantizados y escala
                 with torch.no_grad():
-                    _, q_w, scale_w = module.quantize_weights()
-                    codes_np = q_w.cpu().numpy().astype(np.int8)
-                    scale_val = float(scale_w.item())
+                    if module.use_loaded_bitcos:
+                        codes_np = module.int8_codes.detach().cpu().numpy().astype(np.int8)
+                        scale_val = float(module.packed_scale.item())
+                    elif not module.quantize_weights_enabled:
+                        raise ValueError(
+                            f"No se puede exportar la capa BitLinear '{name}' con quantize_weights_enabled=False."
+                        )
+                    else:
+                        _, q_w, scale_w = module.quantize_weights()
+                        codes_np = q_w.float().cpu().numpy().astype(np.int8)
+                        scale_val = float(scale_w.item())
 
                 out_f, in_f = codes_np.shape
                 # Calcular cuántas filas caben por página de page_size
@@ -190,12 +199,17 @@ class PagedBitCOSSerializer:
                 if is_expert:
                     parts = name.split(".")
                     exp_id = -1
-                    for p in parts:
-                        if p.isdigit():
-                            exp_id = int(p)
-                            break
-                        elif p.startswith("expert_") or p == "shared_expert":
-                            exp_id = 999 if p == "shared_expert" else -1
+                    if "expert_bank" in parts:
+                        eb_idx = parts.index("expert_bank")
+                        if eb_idx + 1 < len(parts) and parts[eb_idx + 1].isdigit():
+                            exp_id = int(parts[eb_idx + 1])
+                    elif "shared_expert" in parts:
+                        exp_id = 999
+                    else:
+                        for p in parts:
+                            if p.startswith("expert_") and p[7:].isdigit():
+                                exp_id = int(p[7:])
+                                break
                     if exp_id != -1:
                         expert_index.setdefault(exp_id, []).extend(tensor_pages)
 
@@ -217,7 +231,7 @@ class PagedBitCOSSerializer:
                 if isinstance(mod, BitLinear)
             )
             if not is_bitlinear_weight and param.numel() > 0:
-                p_np = param.detach().cpu().numpy().astype(np.float32)
+                p_np = param.detach().float().cpu().numpy().astype(np.float32)
                 p_bytes = p_np.tobytes()
                 p_offset = resident_bytes.tell()
                 resident_bytes.write(p_bytes)
@@ -309,10 +323,24 @@ class PagedBitCOSReader:
 
     def _parse_header(self) -> None:
         header_size = struct.calcsize("<8sIIIQQQQQ")
+        file_len = len(self._mm)
+        if file_len < header_size:
+            raise ValueError(f"Archivo Paged BitCOS truncado: {file_len} < {header_size} bytes")
         magic, page_sz, fmt_code, total_pgs, idx_off, exp_off, res_off, pgs_off, total_sz = (
             struct.unpack("<8sIIIQQQQQ", self._mm[:header_size])
         )
         assert magic == MAGIC_PBITCOS, f"Magic inválido: {magic}"
+        if page_sz == 0:
+            raise ValueError("page_size inválido en cabecera Paged BitCOS (0)")
+        if not (header_size <= idx_off <= exp_off <= res_off <= pgs_off <= file_len):
+            raise ValueError(
+                f"Offsets corruptos en cabecera Paged BitCOS: idx={idx_off}, exp={exp_off}, "
+                f"res={res_off}, pages={pgs_off}, file_len={file_len}"
+            )
+        if pgs_off + total_pgs * page_sz > file_len:
+            raise ValueError(
+                f"Rango de páginas excede longitud de archivo: {pgs_off + total_pgs * page_sz} > {file_len}"
+            )
         self.page_size = page_sz
         self.format_type = "compact" if fmt_code == 0 else "fast"
         self.total_pages = total_pgs
@@ -339,8 +367,8 @@ class PagedBitCOSReader:
 
     def read_page_bytes(self, page_id: int) -> bytes:
         """Lee una sola página de 4KB desde el archivo mapeado en memoria (cero sobrecarga de descompresión global)."""
-        if page_id >= self.total_pages:
-            raise IndexError(f"Page ID {page_id} fuera de rango ({self.total_pages})")
+        if page_id < 0 or page_id >= self.total_pages:
+            raise IndexError(f"Page ID {page_id} fuera de rango (0..{self.total_pages - 1})")
         start = self.pages_offset + page_id * self.page_size
         return self._mm[start : start + self.page_size]
 
@@ -406,11 +434,13 @@ class PagedBitCOSReader:
                     scale_val = scales[0] if scales else info["scale"]
                     module.packed_scale.fill_(scale_val)
                     # Criterio Fase 2/3: 0 pesos FP32 en RAM para proyecciones BitLinear
-                    module.cached_w_eff = torch.empty(0)
-                    module.weight = nn.Parameter(torch.empty(0), requires_grad=False)
+                    dev = module.int8_codes.device
+                    module.cached_w_eff = torch.empty(0, device=dev)
+                    module.weight = nn.Parameter(torch.empty(0, device=dev), requires_grad=False)
                     module.use_loaded_bitcos = True
                     loaded_bitlinear += 1
 
+        model.eval()
         return loaded_resident + loaded_bitlinear
 
     def get_accounting_breakdown(self) -> dict[str, Any]:
@@ -446,11 +476,19 @@ class PagedBitCOSReader:
             },
         }
 
+    def __enter__(self) -> "PagedBitCOSReader":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
     def close(self) -> None:
         if hasattr(self, "_mm") and self._mm is not None:
             self._mm.close()
+            self._mm = None
         if hasattr(self, "_f") and self._f is not None:
             self._f.close()
+            self._f = None
 
     def __del__(self) -> None:
         self.close()
