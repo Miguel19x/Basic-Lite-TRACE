@@ -141,7 +141,7 @@ Durante el entrenamiento, un esquema de *Scheduled Sampling* inyecta el valor ex
 
 ## 3. Metodología Experimental y Protocolo Pre-registrado
 
-Para garantizar la reproducibilidad y el rigor epistémico, los experimentos se rigieron bajo un protocolo pre-registrado congelado ([`Protocolo pre-registrado — Basic-Lite (TRDM-v5), Fase 1.md`](../Protocolo%20pre-registrado%20%E2%80%94%20Basic-Lite%20(TRDM-v5),%20Fase%201.md)).
+Para garantizar la reproducibilidad y el rigor epistémico, los experimentos se rigieron bajo criterios prospectivos congelados antes de evaluar la partición de prueba.
 
 ### 3.1. Universo de Evaluación Composicional
 El banco de pruebas simula un entorno determinista de telemetría de sistemas distribuidos:

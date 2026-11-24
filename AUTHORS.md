@@ -34,7 +34,7 @@ Este documento detalla la autoría, el diseño arquitectónico y las atribucione
   - Generador determinista de datos sintéticos (`data.py`) y motor de evaluación de 2 etapas (`eval.py`), con artefactos de evidencia consolidados en `results/`.
 
 ### 2.3. Metodología de Evaluación y Control de Sesgos
-* **Marco de trabajo:** Protocolo experimental pre-registrado y congelado antes de observar los datos de prueba (`Protocolo pre-registrado — Basic-Lite (TRDM-v5), Fase 1.md`).
+* **Marco de trabajo:** Metodología experimental determinista con separación estricta entre entrenamiento, validación y prueba composicional.
 * **Higiene E0:** Verificación empírica de causalidad temporal en bloques, aislamiento estricto de muestras de lote y consistencia de parsers numéricos.
 * **Evaluación confirmatoria:** Corridas independientes con 5 semillas fijadas (`42, 123, 456, 789, 999`) sobre 480 casos de prueba composicional.
 

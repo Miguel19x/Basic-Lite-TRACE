@@ -121,7 +121,7 @@ Todas las modificaciones, versiones y evoluciones arquitectónicas de **Basic-Li
 * **Context Manager de 3 Niveles:**
   - Jerarquía desacoplada en `trdm/core/context_manager.py` (RAM activa, latente comprimido y persistencia en SQLite).
 * **Protocolo Pre-registrado Oficial:**
-  - Especificación formal e inmutable de experimentos E0 a E6 (`Protocolo pre-registrado — Basic-Lite (TRDM-v5), Fase 1.md`).
+  - Especificación histórica de experimentos E0 a E6 (preservada en la etiqueta `prereg-v1`).
   - Ejecución confirmatoria inicial de 5 semillas en Fase 1 (`archive/experiments_v4_v5/e1_confirmatorio_5semillas_results.json`).
 
 ---

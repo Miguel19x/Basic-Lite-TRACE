@@ -3,10 +3,15 @@ venv/
 env/
 .env/
 
-# Python cache and bytecode
+# Python cache, packaging and tooling
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
 
 # C++ build artifacts
 *.o

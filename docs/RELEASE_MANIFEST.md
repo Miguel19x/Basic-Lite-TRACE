@@ -34,8 +34,8 @@ Los siguientes hashes han sido generados mediante el algoritmo estándar SHA-256
 | `CODE_OF_CONDUCT.md` | `31a86da1c334e7c5c79503392d135456356c2ec181000f8466eca270db264f6d` |
 | `SECURITY.md` | `1ba029741067a5c87758b8f16103f123362dffbb4d5d0af1a26f6d6b969a34a1` |
 | `NOTICE.md` | `f95611c431e750afb376053709a3fb897e51b1ff04bd4004ef4906f20b754d36` |
-| `AUTHORS.md` | `2c7a099203dfdc56a25bb1eea549bce129600039d53ce9ff52b3ee24dc39d84c` |
-| `CHANGELOG.md` | `6884379222c5568930185aa53352a39fcb6e8f15852c6e08f47e123a8a9401eb` |
+| `AUTHORS.md` | `6adb579960af5cffb5b00d33c6cf3f5ce46ad2be1b016d249c1204ea75dcf5b7` |
+| `CHANGELOG.md` | `9d03b050fb992627591f781ab50b121d913f77af472889b292433fdad77cec31` |
 | `THIRD_PARTY_NOTICES.md` | `c626ea954c9da9151b35058632cf0d675798a8ce96d05984948874b3a686b43c` |
 | `Makefile` | `dcfd6ac1dd388c06a83e56b5badb9369ec1a0a9b0ce691694bc2a7fb712865c1` |
 | `config.py` | `2633f978f5e01bf2456f22ed6e741f1afb4394b602924da406cd5c10d1532925` |
@@ -96,8 +96,8 @@ Los siguientes hashes han sido generados mediante el algoritmo estándar SHA-256
 | `tests/test_smoke.py` | `d12de343561a43e87a90c38f89cba626da6fd2bb9b7dda751a40d04bfe8717c2` |
 | `tests/test_e0_hygiene.py` | `23bad08aede6ac431091854f5875a01b102e1c228fae7d8e696950ba6b31afbc` |
 | `tests/test_architecture_integrity.py` | `bda1692dbc60c1c245eafda607d129d052ae4f8c212af71a4513982a9dfa1fce` |
-| `docs/PAPER_TECNICO_BASIC_LITE.md` | `91828322b27792d7c84fefb115bfae67a08136cb0a0558c1fdc9a03bb0f6dace` |
-| `docs/PROJECT_IDENTITY.md` | `4cc4138fabd8b8dc9ee85d8006f93b5a0c1ee538500d99ca1626161b79b65bcd` |
+| `docs/PAPER_TECNICO_BASIC_LITE.md` | `8eda057ccbbe03bbb668080cf2f4092cfdccde967167f47a2c10ea3d18906e1c` |
+| `docs/PROJECT_IDENTITY.md` | `a63ec504fac968e29faf6d0390282253921efc1f1441fb7501070dc1be0a07ac` |
 | `docs/AI_ASSISTANCE.md` | `f17475ef92cb4e563f53afb5067705112a535abe1daafe4708b897e88f505db8` |
 | `docs/PROVENANCE.md` | `7a418f2a1fac52ded0b8c0ad8a5057a57ae99999d8e724d64a6a626af4824ea7` |
 | `docs/ROADMAP_TRACE.md` | `6de7ea4061c108b176fe0dd819e7763c4ce319fd4efc66711219d6a151fb4e93` |
@@ -114,7 +114,6 @@ Los siguientes hashes han sido generados mediante el algoritmo estándar SHA-256
 | `eval_composition_audit.py` | `6e13bfa2aaca9ccdd82d7101469ff916520454c9d370bf8fdaa6e0402828a18e` |
 | `data_v2.py` | `2b2acd2f2118a280344bc6627bb002f0e0956551f1b5d0787da970f327a45a41` |
 | `trdm/models/trdm_v6_causal.py` | `1a8686cff07075ff143c4c5f584ebdefd148560b4ce2201c454d9f32009f1e28` |
-| `Protocolo pre-registrado — Basic-Lite (TRDM-v5), Fase 1.md` | `60668166afc9c904e25553ba29c3f8b91892153da301069e76ab32e485cd0f39` |
 | `v6_confirmatorio_5semillas_results.json` | `bf7c8890a1b46dfa7db89d3a6647e1cd64c0f1594d540569f058dad3c1dcc446` |
 
 ---
