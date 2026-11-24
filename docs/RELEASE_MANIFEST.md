@@ -26,7 +26,8 @@ Los siguientes hashes han sido generados mediante el algoritmo estándar SHA-256
 
 | Archivo Fuente / Artefacto | Hash Criptográfico SHA-256 |
 | :--- | :--- |
-| `README.md` | `bf55dfcc547808fcd59f5dba077d0b799fdb867bff9006d7b379eaf4c5dd60f5` |
+| `README.md` | `05ead2002f5b77244c74954f42a646083474fe2a9415b582982d7362212671f2` |
+| `README.es.md` | `8d125903a97df424a5bdeda895296d4e6c45493aada68d18c905ed9a4b6c6fe1` |
 | `LICENSE.txt` | `933abb675562927cd166d6130ee20dbdb5545613c9122019305cb05f44613143` |
 | `LICENSE-EN.md` | `06827a519c33975b2e2ebc9e7f20342b8ff42c878166947fdbb0977b23d3f241` |
 | `CONTRIBUTING.md` | `ae4af9dadeec6125b5600cccc69888b6cc8dec7e569067d64f05a10819af153f` |
