@@ -3,6 +3,7 @@
 # Copyright © 2026 Miguel19x
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 """
 Preparador de Corpus y Exportador Binario UINT16 para Basic-Lite TRACE.

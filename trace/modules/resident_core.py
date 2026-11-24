@@ -2,6 +2,7 @@
 # Copyright © 2026 Miguel19x
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 from trace.layers.bitlinear import BitLinear
 from trace.layers.embeddings import SinusoidalStepEncoding

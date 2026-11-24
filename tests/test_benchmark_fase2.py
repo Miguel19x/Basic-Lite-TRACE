@@ -1,3 +1,9 @@
+# Basic-Lite TRACE
+# Copyright © 2026 Miguel19x
+# Todos los derechos reservados.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
+# Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+
 """
 Basic-Lite TRACE — Benchmark Formal de Inferencia Fase 2 (Hito 2.5).
 

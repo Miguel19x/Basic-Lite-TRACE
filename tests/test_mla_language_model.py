@@ -1,3 +1,9 @@
+# Basic-Lite TRACE
+# Copyright © 2026 Miguel19x
+# Todos los derechos reservados.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
+# Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+
 """
 Suite de Validación y Contratos Arquitectónicos para TRACELanguageModel (Hito 3.2):
 1. Equivalencia matemática estándar vs. absorción completa (W_uk y W_uv, diff < 1e-4).

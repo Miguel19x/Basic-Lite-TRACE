@@ -1,6 +1,6 @@
 # Basic-Lite TRACE — Informe Técnico de Benchmark de Inferencia y Eficiencia (Fase 3)
 
-**Autor e Investigador Titular:** Miguel Angel Aranguren Ramirez (**Miguel19x**)  
+**Autor e Investigador Titular:** Miguel19x  
 **Entorno de Hardware Certificado:** Intel Core i3-1115G4 (2 núcleos físicos / 4 hilos, 3.00 GHz, AVX2/FMA), 16 GB RAM DDR4, SSD NVMe, Linux x86_64.  
 **Concurrencia de Ejecución:** `--cpu_threads 2` (`OMP_NUM_THREADS=2`)  
 **Modelo de Evaluación:** `TRACELMConfig.preset_25m()` (12 capas, $d_{\text{model}}=512$, $d_{ff}=1024$, $n_{\text{heads}}=8$, $d_c=128$, $d_h=64$, $d_{pe}=32$, $d_v=64$, vocabulario BPE 4096, tied embeddings, 1,548 páginas Paged BitCOS v1.1).

@@ -12,7 +12,9 @@ Este proyecto hace uso de librerías y componentes de software de código abiert
 | **NumPy** | NumPy Developers | BSD-3-Clause | Operaciones numéricas, generación de arrays y evaluación | `licenses/LICENSE_NUMPY.txt` |
 | **SQLite3** | SQLite Consortium (D. Richard Hipp) | Dominio Público / SQLite Blessing | Persistencia en disco del Nivel 3 del Context Manager | `licenses/LICENSE_SQLITE.txt` |
 | **Linux POSIX / mmap** | Linux Kernel Organization / POSIX standards | GPLv2 (Kernel) / Interfaz POSIX de usuario (Libc) | Mapeo directo a páginas de memoria del OS en Paged BitCOS | Headers del sistema operativo |
-| **OpenMP** | OpenMP Architecture Review Board | Runtime de compilador GCC/Clang | Paralelismo multinúcleo en kernels C optimizados | Headers del sistema |
+| **OpenMP** | OpenMP Architecture Review Board | Runtime de compilador GCC/Clang (GCC Runtime Library Exception) | Paralelismo multinúcleo en kernels C optimizados | Headers del sistema |
+| **pytest** *(solo desarrollo/CI)* | pytest-dev | MIT License | Ejecución de suites de pruebas automatizadas en CI | Instalado vía pip en CI |
+| **Ruff** *(solo desarrollo/CI)* | Astral Software | MIT License | Verificación estática de estilo y sintaxis Python en CI | Instalado vía pip en CI |
 
 ---
 
@@ -26,7 +28,8 @@ Los textos completos de las licencias de código abierto se conservan íntegrame
 
 ---
 
-## 3. Declaración de Independencia y No Afectación
+## 3. Declaración de Independencia, Modelos Externos y No Afectación
 
 * Los componentes de terceros se rigen estrictamente por sus términos de distribución originales.
-* El aviso de reserva de derechos y protección legal de **Basic-Lite TRACE** contenido en `LICENSE.txt` y `NOTICE.md` aplica **únicamente** a los módulos, algoritmos, kernels y arquitecturas de autoría original desarrollados por Miguel19x, y no pretende en modo alguno atribuirse titularidad sobre librerías o sistemas operativos de terceros.
+* El aviso de reserva de derechos y protección legal de **Basic-Lite TRACE** contenido en `LICENSE.txt` y `NOTICE.md` aplica **únicamente** a los módulos, algoritmos, kernels, pesos entrenados y artefactos de autoría original desarrollados por Miguel19x, y no pretende en modo alguno atribuirse titularidad sobre librerías, sistemas operativos ni modelos o pesos abiertos de terceros (por ejemplo, pesos externos compatibles como `microsoft/BitNet-b1.58-2B-4T` bajo licencia MIT u otros modelos abiertos que el usuario decida convertir o ejecutar mediante el formato Paged BitCOS).
+* Cuando un usuario importe, convierta o ejecute pesos de terceros en el motor Basic-Lite TRACE, dichos pesos continúan sujetos íntegramente a la licencia de su proveedor original.

@@ -1,3 +1,9 @@
+# Basic-Lite TRACE
+# Copyright © 2026 Miguel19x
+# Todos los derechos reservados.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
+# Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+
 """
 Test de paridad y exactitud numérica estricta en int32 (diff == 0) y float32 (Delta < 1e-5):
 1. Valida paged_direct_matmul_fast_c (ruta 2-bit empaquetada con alineación de 32 pesos).

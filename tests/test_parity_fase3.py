@@ -2,6 +2,7 @@
 Basic-Lite TRACE — Suite Formal de Paridad y Falsación Activa de Fase 3
 Copyright © 2026 Miguel Angel Aranguren Ramirez (Miguel19x)
 Todos los derechos reservados. Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 Valida:
 1. Paridad Numérica Estricta (<= 1e-4) en Modelo Compacto (2 capas, D=128):

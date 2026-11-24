@@ -1,3 +1,9 @@
+# Basic-Lite TRACE
+# Copyright © 2026 Miguel19x
+# Todos los derechos reservados.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
+# Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+
 """
 Suite de Paridad Numérica y Falsación Activa — Fase 2 (Hito 2.3):
 1. Paridad numérica end-to-end:

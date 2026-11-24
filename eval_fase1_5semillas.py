@@ -3,6 +3,7 @@
 # Copyright © 2026 Miguel Angel Aranguren Ramirez (Miguel19x)
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 """
 Evaluación exploratoria multi-semilla de Fase 1 (Basic-Lite TRACE).

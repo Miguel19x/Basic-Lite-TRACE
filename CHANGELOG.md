@@ -4,6 +4,19 @@ Todas las modificaciones, versiones y evoluciones arquitectónicas de **Basic-Li
 
 ---
 
+## [TRACE-1.3.0] — Motor Nativo C Standalone (`O_DIRECT` + AVX2) y Cierre de Fase 2 — 2026-11-22
+
+### Añadido y Consolidado
+* **Motor Nativo C TRACE (`csrc/`, evolucionado desde `paged_gemm_kernel.c` y `trace_infer.c`):**
+  - Serialización y carga directa mediante `O_DIRECT` + `pread` con *page pool* alineado a 4096 bytes (`export_paged.py`, `csrc/trace_loader.c`, `csrc/trace_causal.c`).
+  - Micro-kernel GEMM ternario con tiling $K=512$, dispatch dinámico escalar/AVX2 (`csrc/paged_dispatch.c`, `csrc/paged_gemm_avx2.c`, `csrc/paged_gemm_scalar.c`) y ejecución estricta en 2 hilos (`OMP_NUM_THREADS=2`).
+  - Paridad numérica exacta verificada frente a PyTorch AddSub (0 discrepancias de predicción, 0 pesos FP32 en `BitLinear`) y speedup medido de **3.74×–3.93×** (~75.59 ms/muestra en Intel Core i3-1115G4).
+* **Gobernanza y Blindaje Legal:**
+  - Actualización de `LICENSE.txt` (requisito de notificación previa para PoC de 30 días, acotación de titularidad frente a modelos de terceros, cláusula de divisibilidad y ley aplicable/idioma prevalente) y publicación de traducción informativa en inglés (`LICENSE-EN.md`).
+  - Incorporación de plantillas de gobernanza en `.github/` y `CODE_OF_CONDUCT.md`.
+
+---
+
 ## [TRACE-1.2.0] — Convergencia QAT BitNet b1.58 y Calibración — 2026-11-22
 
 ### Añadido y Consolidado

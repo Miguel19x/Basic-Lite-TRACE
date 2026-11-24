@@ -2,6 +2,7 @@
 # Copyright © 2026 Miguel19x
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 """
 Test de Paridad Temporal Estricta PyTorch vs Motor Nativo C (libtrace_lm.so).

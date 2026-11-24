@@ -1,37 +1,39 @@
 # Directrices de Colaboración — Basic-Lite TRACE
 
-Gracias por tu interés en el proyecto **Basic-Lite TRACE**.
+Gracias por tu interés en **Basic-Lite TRACE**.
+
+Para preservar la trazabilidad científica, la coherencia arquitectónica del motor C y la titularidad legal única del proyecto, **Basic-Lite TRACE** sigue un modelo de desarrollo similar al de **SQLite**: código visible y auditable, con el núcleo gestionado de forma centralizada y **tres canales claros de participación**.
 
 ---
 
-## 1. Política de Aportaciones al Repositorio
+## 1. Los Tres Canales de Colaboración
 
-Para preservar la capacidad de mantenimiento, la coherencia técnica del motor y la trazabilidad de los protocolos experimentales, el desarrollo del núcleo se gestiona de forma centralizada:
+### Canal 1 — Benchmarks Comunitarios y Reproducción en Hardware Diverso *(Abierto vía Issues)*
+Si dispones de hardware distinto a la máquina base de referencia (`Intel Core i3-1115G4`) —por ejemplo **AMD Ryzen, Intel AVX-512, ARM64 / Apple Silicon o servidores Linux**—, te invitamos a ejecutar `make all`, `make test` o `./trace_lm` y abrir una **Issue** con tus mediciones (TTFT, `tok/s`, RAM pico `Max RSS` y versión de GCC/kernel). Esta validación empírica externa fortalece directamente la evidencia del proyecto.
 
-* **Desarrollo del núcleo:** Actualmente no se incorporan aportaciones abiertas por pull request en el repositorio principal para preservar la coherencia técnica y legal.
-* **Incorporación al Equipo Núcleo e Investigación:** El proyecto busca activamente colaboradores técnicos interesados en sumarse al equipo fundador y de investigación (en optimización de kernels C/SIMD/Linux y escalado ML en PyTorch) bajo acuerdos bilaterales formales y coautoría técnica. Si deseas construir sobre esta arquitectura a largo plazo, consulta la Sección 8 de [README.md](README.md) y escribe directamente a `miguelaranguren19x@outlook.com`.
-* **Canales de participación pública:**
-  1. **Apertura de Issues:** Notificación de errores de compilación o ejecución, aportando detalles del entorno.
-  2. **Discusiones Técnicas:** Consultas conceptuales y contraste de hipótesis.
-  3. **Reproducción de Resultados:** Comunicación de resultados independientes obtenidos al replicar los protocolos documentados.
+### Canal 2 — Reportes de Errores y Diagnósticos Técnicos *(Abierto vía Issues)*
+Puedes abrir una **Issue** para reportar fallos de compilación, discrepancias numéricas o análisis de cuellos de botella (por ejemplo, optimización del *prefill* en frío en `csrc/lm/trace_lm_infer.c` o soporte multi-arquitectura). Para mantener limpia la cadena de propiedad intelectual (*clean-room*), las correcciones en el núcleo se integran internamente a partir del diagnóstico documentado.
 
----
+### Canal 3 — Incorporación al Equipo Núcleo *(Acuerdo Bilateral Formal)*
+El proyecto busca colaboradores técnicos de alto nivel interesados en construir a largo plazo en:
+* **Sistemas y Bajo Nivel (C / SIMD / Linux):** Kernels ternarios (AVX2/AVX-512/NEON), `O_DIRECT` / `io_uring` y perfilado de latencia.
+* **Investigación y Escalado ML (PyTorch):** Entrenamiento QAT ternario, MLA, MoE paginado y evaluación rigurosa.
 
-## 2. Reglas para el Reporte de Incidencias y Privacidad
-
-Al abrir una incidencia técnica o solicitar aclaraciones:
-
-* **Protección de datos y confidencialidad:** No envíes datos personales, sensibles o confidenciales en incidencias, registros de error (*logs*) o solicitudes públicas de soporte. Utiliza siempre ejemplos ficticios mínimos y reproducibles.
-* **Alcance de la atención:** Esta publicación no incluye un servicio de soporte técnico garantizado ni validación de aplicaciones finales. Las consultas se atienden según disponibilidad, salvo acuerdo bilateral separado.
+> [!TIP]
+> **La mejor puerta de entrada al equipo núcleo** es abrir primero una Issue técnica de calidad o publicar una reproducción independiente; a partir de ahí coordinamos directamente un acuerdo formal de coautoría científica o colaboración escribiendo a `miguelaranguren19x@outlook.com`.
 
 ---
 
-## 3. Bifurcaciones y Desarrollo Independiente
+## 2. Política de Pull Requests
 
-Cualquier persona u organización puede crear bifurcaciones (*forks*) para los fines autorizados por la licencia y explorar modificaciones técnicas de manera independiente en sus propios repositorios, conforme a las condiciones de atribución, licencia y entrega del código fuente correspondiente establecidas en [LICENSE.txt](LICENSE.txt).
+* **Sin Pull Requests abiertos no acordados:** Actualmente no se fusionan *pull requests* externos sin coordinación previa ni acuerdo formal de coautoría o cesión de derechos, con el fin de evitar ambigüedades de titularidad o contaminación de licencias.
+* **Bifurcaciones (*forks*) independientes:** Cualquier persona u organización puede bifurcar el repositorio y explorar modificaciones técnicas de manera independiente para los fines autorizados, cumpliendo las condiciones de atribución, licencia y entrega del código fuente establecidas en [LICENSE.txt](LICENSE.txt).
 
 ---
 
-## 4. Previsión sobre Futuros Acuerdos de Contribución
+## 3. Reglas de Privacidad y Seguridad en Issues
 
-Si en una etapa posterior se decidiera abrir la recepción de aportaciones externas, se definirá previamente un procedimiento formal y un acuerdo de colaboración que precise las autorizaciones necesarias para mantener la coherencia del proyecto y sus modalidades de licenciamiento.
+Al abrir una Issue técnica o compartir resultados de benchmark:
+* **Privacidad de datos:** No envíes datos personales, confidenciales, credenciales ni conjuntos de datos propietarios en issues o *logs*. Utiliza siempre ejemplos mínimos y sintéticos.
+* **Vulnerabilidades de seguridad:** Si descubres un fallo de memoria en C, corrupción de paginación o fuga de descriptores, **NO abras una issue pública**; sigue el canal privado de [SECURITY.md](SECURITY.md).
+* **Alcance de la atención:** Esta publicación no incluye soporte técnico garantizado ni validación de aplicaciones finales salvo acuerdo bilateral separado.

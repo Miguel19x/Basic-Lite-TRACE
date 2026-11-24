@@ -17,7 +17,7 @@ El diseño se rige por el principio de **residencia y ejecución selectivas**: d
 La arquitectura **TRACE** (*Ternary Resident Architecture for Convergent Execution*) integra los siguientes principios:
 
 * **Ternary (Ternario W1.58A8 — Preservado al 100%):**  
-  Todas las proyecciones nucleares operan con cuantización ternaria $\{-1, 0, 1\}$ mediante [trace/layers/bitlinear.py](trace/layers/bitlinear.py) con estimador de gradiente recto (STE). En runtime, los tensores se ejecutan directamente sobre páginas binarias sin inflar matrices a FP32 en RAM mediante el kernel C fusionado ([paged_gemm_kernel.c](paged_gemm_kernel.c)) y el formato [Paged BitCOS v1](trace/serialization/paged_bitcos.py).
+  Todas las proyecciones nucleares operan con cuantización ternaria $\{-1, 0, 1\}$ mediante [trace/layers/bitlinear.py](trace/layers/bitlinear.py) con estimador de gradiente recto (STE). En runtime, los tensores se ejecutan directamente sobre páginas binarias sin inflar matrices a FP32 en RAM mediante los kernels C fusionados ([csrc/paged_dispatch.c](csrc/paged_dispatch.c), [csrc/paged_gemm_avx2.c](csrc/paged_gemm_avx2.c)) y el formato [Paged BitCOS v1](trace/serialization/paged_bitcos.py).
 
 * **Resident / Recursive (Residencia Selectiva y Recursividad Dinámica):**  
   El núcleo residente compartido ([trace/modules/resident_core.py](trace/modules/resident_core.py)) no apila capas densas tradicionales, sino que reitera $R$ pasos de recursión sobre un estado latente dual: razonamiento profundo ($z_r$) y respuesta ($y_r$). Incluye codificación sinusoidal continua de profundidad $e_r$ y una compuerta adaptativa de parada temprana (*adaptive halting gate*).
@@ -76,15 +76,15 @@ flowchart TD
 * **Mecanismo de Escape y Buddy Experts ([trace/modules/paged_moe.py](trace/modules/paged_moe.py)):** Si la afinidad $U(e)$ supera el umbral crítico, se autoriza la lectura física; en escenarios de restricción temporal estricta, el ruteador despacha a un experto sustituto residente (*buddy expert*) para eludir la detención de I/O.
 
 ### 3.3. Eje 3: Multi-Head Latent Attention (MLA) y Memoria Contextual en 3 Niveles
-* **MLA ([trace/modules/mla_attention.py](trace/modules/mla_attention.py)):** Comprime las matrices de claves y valores (KV) hacia un cuello de botella latente conjunto $c_t^{KV}$, reduciendo el tamaño de la caché de atención activa entre **4× y 8×** frente a GQA o atención estándar.
+* **MLA ([trace/lm/mla.py](trace/lm/mla.py)):** Comprime las matrices de claves y valores (KV) hacia un cuello de botella latente conjunto $c_t^{KV}$, reduciendo el tamaño de la caché de atención activa entre **4× y 8×** (hasta **15.75×** con cuantización KV INT8) frente a GQA o atención estándar.
 * **Desacoplamiento Contextual ([trace/core/context_manager.py](trace/core/context_manager.py)):**
   * *Nivel 1 (Activo):* Ventana de atención directa en RAM.
   * *Nivel 2 (Comprimido):* Resúmenes latentes de bloques temporales previos.
   * *Nivel 3 (Archivo Persistente):* Almacenamiento exacto en SQLite sobre disco para recuperación sin pérdidas de hechos numéricos e históricos.
 
-### 3.4. Eje 4: Compresión Jerárquica de Bytes (Hierarchical Byte Patching, P=4)
-* **Principio:** Preservar la universalidad del vocabulario de bytes (260 tokens, sin tokenizador rígido dependiente del dominio) mientras se mitiga el costo cuadrático de atención.
-* **Impacto ([trace/layers/byte_patcher.py](trace/layers/byte_patcher.py)):** Agrupar localmente $P=4$ bytes en vectores continuos divide la longitud efectiva de la secuencia por 4 ($L/4$), recortando el cálculo de atención recurrente en un factor de **$16\times$** ($P^2$).
+### 3.4. Eje 4: Compresión Jerárquica de Bytes (P=4) y Tokenización BPE Compacta
+* **Principio:** Preservar la compacidad del vocabulario y el alineamiento exacto de dígitos (1:1) mientras se mitiga el costo cuadrático de atención.
+* **Evolución de implementación:** En los experimentos causales fundacionales (Fase 1–2) se operó directamente sobre bytes ASCII (vocabulario 260); para el modelo de lenguaje autorregresivo de Fase 3 se consolidó un tokenizador **BPE compacto nativo en C** ([csrc/lm/trace_tokenizer.c](csrc/lm/trace_tokenizer.c) y [trace/lm/tokenizer.py](trace/lm/tokenizer.py), vocabulario 4K–8K con dígitos 1:1 y *tied embeddings*).
 
 ### 3.5. Eje 5: Abacus Embeddings y Campo Causal en 2 Etapas
 * **Abacus Positional Embeddings ([trace/layers/abacus.py](trace/layers/abacus.py)):** Extrae mediante cálculo 100% vectorizado los rangos decimales relativos de derecha a izquierda (unidades=0, decenas=1, centenas=2) para tokens numéricos ASCII, dotando al transformador de conciencia del valor posicional.
@@ -193,7 +193,7 @@ OMP_NUM_THREADS=2 make clean && make all
 | **Router MoE con Costo de E/S** | Evitar saturación del canal PCIe/NVMe con intercambio indiscriminado de módulos. | Ahorro masivo de transferencias conservando módulos frecuentes en RAM. | Requiere calibrar $\lambda_{\text{read}}$ y prever *buddy experts* ante fallos de caché. |
 | **Multi-Head Latent Attention** | Reducir tensores de atención activa retenidos en memoria de trabajo. | Descompresión latente de KV; ahorro de 4×–8× en RAM activa. | Añade una proyección lineal para descomprimir $K$ y $V$ en inferencia. |
 | **Abacus Embeddings** | Dotar a tokens de bytes ASCII de simetría de orden de magnitud decimal (U, D, C). | Eleva la exactitud de dígitos del 60.5% a >81.9% y facilita el cálculo. | Requiere vectorización de suma acumulativa invertida en capas de entrada. |
-| **Campo Causal en 2 Etapas** | Eliminar el colapso de Exact Match por factorización paralela independiente. | Permite resolución exacta en cálculo acoplado (Full-EM escala de 0% a 13.33%). | Requiere dos pasadas hacia adelante en inferencia (una por etapa). |
+| **Campo Causal en 2 Etapas** | Eliminar el colapso de Exact Match por factorización paralela independiente. | Permite resolución exacta en cálculo acoplado (Full-EM escala de 0% a 90.29% ± 13.44%, pico 98.96%). | Requiere dos pasadas hacia adelante en inferencia (una por etapa). |
 | **Staged Warmup Curriculum** | Evitar que errores de la Etapa 1 destruyan el aprendizaje aditivo de la Etapa 2. | Convergencia estable de la adición multivariable con scheduled sampling. | Requiere calibrar la duración de la fase de calentamiento ($40\%$ de los pasos). |
 
 ---
@@ -202,71 +202,52 @@ OMP_NUM_THREADS=2 make clean && make all
 
 ```
 .
-├── .github/                                  # Automatización e integración continua
+├── .github/                                  # Automatización, CI y gobernanza en GitHub
+│   ├── ISSUE_TEMPLATE/                       # Plantillas de reporte con aviso de privacidad y seguridad
+│   ├── PULL_REQUEST_TEMPLATE.md              # Aviso de política de PRs y titularidad única
 │   └── workflows/
-│       └── ci.yml                            # Pipeline de CI en GitHub Actions (Ubuntu)
-├── csrc/                                     # Código fuente C modular del motor TRACE
-│   ├── trace_infer.h                         # Cabecera canónica unificada y estructuras de modelo
-│   ├── trace_math.h                          # Rutinas matemáticas optimizadas en AVX2 (RMSNorm, dot product)
-│   ├── paged_gemm.c                          # Kernel GEMM ternario con tiling K=512 y aceleración AVX2
-│   ├── trace_loader.c                        # Cargador de pesos O_DIRECT y validación de cabecera
-│   └── trace_causal.c                        # Pipeline autorregresivo causal y punto de entrada CLI
+│       └── ci.yml                            # Pipeline de CI en GitHub Actions (Ubuntu, Ruff, GCC, pytest)
+├── csrc/                                     # Motor nativo C modular (O_DIRECT, AVX2/FMA, OpenMP)
+│   ├── lm/                                   # Motor C autorregresivo de lenguaje (BPE, MLA, KV INT8, trace_lm)
+│   ├── paged_dispatch.{c,h}                  # Dispatch dinámico escalar / AVX2 para GEMM ternario
+│   ├── paged_gemm_avx2.c                     # Micro-kernel GEMM ternario AVX2 Add-Sub
+│   ├── paged_gemm_scalar.c                   # Micro-kernel escalar C99 de referencia portable
+│   ├── paged_unpack.h                        # Desempaquetado de páginas Paged BitCOS v1
+│   ├── trace_infer.h / trace_math.h          # Cabeceras canónicas y rutinas matemáticas SIMD
+│   ├── trace_loader.c                        # Cargador de pesos O_DIRECT alineado a 4096 bytes
+│   └── trace_causal.c                        # Pipeline causal de 2 etapas y CLI standalone (trace_infer)
 ├── config.py                                 # Configuración unificada de hiperparámetros
 ├── data.py                                   # Generador procedural de datos y particiones científicas
-├── train.py                                  # Pipeline de entrenamiento causal con Staged Warmup
-├── eval.py                                   # Motor de evaluación causal multivariable en 2 pasos
+├── train.py / eval.py                        # Entrenamiento (QAT BitNet b1.58) y evaluación en 2 etapas
+├── export_paged.py / export_paged_lm.py      # Exportadores PyTorch -> Paged BitCOS v1 / v1.1
 ├── requirements.txt                          # Dependencias de entorno fijadas (PyTorch CPU, NumPy)
-├── Makefile                                  # Automatización de compilación de kernel C y suites de test
-├── LICENSE.txt                               # Licencia Source-Available única (Investigación, Docencia y Evaluación)
-├── CONTRIBUTING.md                           # Directrices de colaboración y equipo núcleo
-├── NOTICE.md                                 # Aviso de alcance técnico y reserva de derechos
-├── AUTHORS.md                                # Registro de autoría, contribuciones y créditos científicos
-├── CHANGELOG.md                              # Historial formal de versiones y cambios
-├── SECURITY.md                               # Política de divulgación responsable de vulnerabilidades
+├── Makefile                                  # Compilación completa (libpaged_gemm, trace_infer, trace_lm)
+├── LICENSE.txt / LICENSE-EN.md               # Licencia Source-Available vinculante (ES) y referencia (EN)
+├── CONTRIBUTING.md / CODE_OF_CONDUCT.md      # Canales de colaboración (modelo SQLite) y conducta técnica
+├── NOTICE.md / AUTHORS.md                    # Aviso de proyecto, autoría y créditos científicos
+├── CHANGELOG.md / SECURITY.md                # Historial de versiones y divulgación responsable
 ├── THIRD_PARTY_NOTICES.md                    # Atribuciones y licencias de dependencias externas
 ├── Protocolo pre-registrado — Basic-Lite...  # Protocolo experimental congelado de Fase 1
-├── results/                                  # Registros experimentales confirmatorios pre-registrados
-│   ├── e0_higiene_results.json               # Higiene de medición (E0)
-│   ├── e1_confirmatorio_5semillas_results.json # Evaluación 5 semillas Fase 1 (TRDM-v5)
-│   ├── e2_aislamiento_causal_results.json    # Aislamiento causal (E2)
-│   ├── e4_caracterizacion_nvme_results.json  # Caracterización física NVMe (E4)
-│   └── eval_confirmatorio_5semillas_results.json # Evaluación 5 semillas Fase 2 (TRACE)
-├── docs/                                     # Documentación técnica, procedencia y criptografía
+├── results/                                  # Registros experimentales confirmatorios y benchmarks JSON
+├── docs/                                     # Documentación técnica, roadmaps, procedencia y criptografía
 │   ├── PROJECT_IDENTITY.md                   # Memoria de identidad técnica y convergencia TRACE
 │   ├── PROVENANCE.md                         # Inventario de procedencia y cadena de custodia
-│   ├── RELEASE_MANIFEST.md                   # Manifiesto criptográfico de hashes SHA-256
-│   ├── AI_ASSISTANCE.md                      # Registro de asistencia por IA y límites metodológicos
-│   └── PAPER_TECNICO_BASIC_LITE.md           # Memoria técnica completa y resultados
-├── tests/                                    # Pruebas automatizadas y suites de verificación
-│   ├── test_smoke.py                         # Test de humo para kernel C y forward pass causal
-│   ├── test_avx2_kernel.py                   # Verificación AVX2 int32 (diff == 0) y tiling K
-│   ├── test_paged_bitcos.py                  # Integridad de serialización O_DIRECT 4096-bytes
-│   ├── test_parity_and_falsification.py      # Paridad PyTorch AddSub y falsación cruzada
-│   ├── test_trace_infer.py                   # Inmutabilidad de I/O y paridad nativa C
-│   ├── test_benchmark_fase2.py               # Medición de latencia y speedup >= 3.0x
-│   ├── test_context_manager.py               # Pruebas de SQLite FTS5 y contexto
-│   ├── test_e0_hygiene.py                    # Auditoría de reproducibilidad E0
-│   └── test_architecture_integrity.py        # Verificación estricta de defaults y arquitectura
-├── trace/                                    # Paquete modular canónico
-│   ├── core/
-│   │   ├── context_manager.py                # Gestor de contexto jerárquico (L1 RAM, L2 Latente, L3 SQLite FTS5)
-│   │   └── types.py                          # Definiciones de tipos y ModelOutput
-│   ├── layers/
-│   │   ├── abacus.py                         # Abacus Positional Embeddings vectorizado
-│   │   ├── bitlinear.py                      # Capa W1.58A8 con gradiente recto (STE)
-│   │   ├── ffn.py                            # TernaryExpert residente con Squared-ReLU
-│   │   └── norm.py                           # RMSNorm
-│   ├── modules/
-│   │   ├── attention.py                      # BlockCausalGQATernaryAttention
-│   │   ├── paged_moe.py                      # PagedMoE residente
-│   │   └── resident_core.py                  # Núcleo ternario residente compartido
-│   ├── models/
-│   │   └── causal.py                         # TRACECausalModel: Modelo causal integrado de 2 etapas
-│   ├── ops/
-│   │   ├── paged_c_kernel.py                 # Enlace ctypes con csrc/paged_gemm.c
-│   │   └── ternary_cpu.py                    # Operaciones ternarias de CPU
-│   └── serialization/
-│       └── paged_bitcos.py                   # Serialización y lectura de páginas Paged BitCOS v1
+│   ├── RELEASE_MANIFEST.md (+ .tsq / .tsr)   # Hashes SHA-256 y sello de tiempo externo RFC 3161
+│   ├── AI_ASSISTANCE.md                      # Registro de asistencia por IA y autoría humana
+│   ├── PAPER_TECNICO_BASIC_LITE.md           # Memoria técnica fundacional
+│   ├── FASE3_BENCHMARK.md                    # Informe de benchmark de inferencia Fase 3 (25M)
+│   ├── HITO_3_7_BENCHMARKS.md                # Resultados de preentrenamiento bilingüe 45m-bi (Hito 3.7)
+│   └── ROADMAP_TRACE.md / ROADMAP_POST_FASE5.md # Hojas de ruta técnicas
+├── scripts/ / notebooks/                     # Scripts de corpus, entrenamiento LM, benchmarks y piloto GPU
+├── tests/                                    # Suites de verificación (AVX2, O_DIRECT, paridad, MLA, E0)
+├── trace/                                    # Paquete modular Python canónico
+│   ├── core/                                 # Gestor de contexto jerárquico (L1/L2/SQLite FTS5) y tipos
+│   ├── layers/                               # Abacus, BitLinear W1.58A8, FFN, RMSNorm, RoPE, Embeddings
+│   ├── lm/                                   # TRACELanguageModel, MLA ternaria, config y tokenizador BPE
+│   ├── modules/                              # Atención, PagedMoE residente y SharedResidentTernaryCore
+│   ├── models/                               # TRACECausalModel (Campo Causal en 2 Etapas)
+│   ├── ops/                                  # Enlaces ctypes con libpaged_gemm.so y ops ternarias CPU
+│   └── serialization/                        # Serialización y lectura Paged BitCOS v1 / v1.1
 └── licenses/                                 # Textos completos de licencias de terceros
 ```
 
@@ -283,12 +264,10 @@ source venv/bin/activate
 # 2. Instalar dependencias base (optimizado para CPU)
 pip install -r requirements.txt
 
-# 3. Compilar el kernel C fusionado nativo (requiere GCC con OpenMP y AVX2)
-make
-# O alternativamente vía gcc directo:
-# gcc -O3 -march=native -fopenmp -shared -fPIC paged_gemm_kernel.c -o libpaged_gemm.so
+# 3. Compilar el motor nativo C y kernels (requiere GCC con OpenMP y AVX2)
+make all
 
-# 4. (Opcional) Ejecutar suite de pruebas de humo
+# 4. (Opcional) Ejecutar suite de pruebas
 make test
 ```
 
@@ -301,7 +280,7 @@ python train.py --steps 1000 --batch_size 32 --warmup_ratio 0.40 --device cpu
 ### 7.3. Evaluación del Checkpoint Oficial
 
 > [!NOTE]
-> Los binarios y checkpoints (`*.pt`) se encuentran excluidos del control de versiones vía `.gitignore`. El archivo `trace_checkpoint.pt` puede generarse localmente completando el entrenamiento piloto (sección 7.2) o descargarse directamente desde los assets de [GitHub Releases](https://github.com/Miguel19x/Basic-Lite-TRACE/releases).
+> Los binarios y checkpoints (`*.pt`, `*.bin`) se encuentran excluidos del control de versiones vía `.gitignore`. El checkpoint causal puede generarse localmente completando el entrenamiento piloto (sección 7.2) y los releases públicos se gestionan en [GitHub Releases](https://github.com/Miguel19x/Basic-Lite-TRACE/releases) (última versión publicada: `v1.3.0-trace`; el artefacto de `v1.0.0-trace` es histórico e incompatible con la arquitectura actual).
 >
 > [!WARNING]
 > **Compatibilidad estructural (v1.2.0-trace):** Los checkpoints previos de `v1.0.0-trace` (`trace_column_checkpoint.pt`) son incompatibles con la arquitectura actual debido a la migración de `lm_head` a `nn.Linear(d_model, vocab_size, bias=False)` en FP32, el reemplazo de `time_emb` por `stage_emb = nn.Embedding(4, d_model)` para condicionamiento de etapas ($stage\_id \in \{0, 1, 2, 3\}$) y la máscara causal de target unificado `build_target_unified_mask`. Para evaluar el motor actual utilice los checkpoints generados bajo el schedule BitNet b1.58 de Fase 1 (`checkpoints/trace_s*_fase1_bitnet_last.pt`). Consulta [docs/ROADMAP_TRACE.md](docs/ROADMAP_TRACE.md) y [CHANGELOG.md](CHANGELOG.md).
@@ -331,26 +310,28 @@ print('Resultados Test-Composicional:', results)
 
 Basic-Lite TRACE se publica bajo una licencia **Source-Available** con un propósito claro: permitir escrutinio científico, docencia y evaluación técnica legítima, impidiendo al mismo tiempo la apropiación o explotación comercial no autorizada por terceros.
 
-La hoja de ruta contempla llevar esta arquitectura desde su prototipo experimental hacia **modelos escalados y motores de inferencia de grado productivo** (eventualmente en modalidad privada/comercial). Por coherencia técnica y de propiedad intelectual, este repositorio público no acepta *pull requests* abiertos; sin embargo, **el proyecto busca colaboradores técnicos** interesados en integrarse al equipo núcleo bajo acuerdos claros (coautoría científica en fase de investigación y participación formal en la fase de escalado):
+La hoja de ruta contempla llevar esta arquitectura desde su prototipo experimental hacia **modelos escalados y motores de inferencia de grado productivo** (eventualmente en modalidad privada/comercial). Siguiendo un modelo similar al de **SQLite**, el núcleo del repositorio no fusiona *pull requests* abiertos sin acuerdo previo para preservar la titularidad única y la coherencia científica, pero existen **tres canales activos de participación** (véase [CONTRIBUTING.md](CONTRIBUTING.md)):
 
-* **Sistemas y Bajo Nivel (C / SIMD / Linux):** Optimización de kernels ternarios (AVX2/AVX-512), gestión de memoria y paginación sobre NVMe (`mmap` / `io_uring`) y perfilado de latencia.
-* **Investigación y Escalado ML (PyTorch):** Reducción de varianza en el campo causal de 2 etapas, entrenamiento a mayor escala, benchmarks competitivos y publicación técnica.
-
-Si te interesa construir sobre esta arquitectura a largo plazo, escribe directamente a `miguelaranguren19x@outlook.com` con tu perfil técnico o enlace a trabajos previos.
+* **Benchmarks comunitarios en hardware diverso (Issues):** Ejecuta `make all` / `./trace_lm` en tu CPU (AMD Ryzen, Intel AVX-512, ARM64) y comparte tus mediciones reproducibles.
+* **Diagnósticos técnicos y reportes (Issues):** Reporta bugs o analiza cuellos de botella (p. ej. optimización del *prefill* en frío en `csrc/lm/trace_lm_infer.c`).
+* **Equipo núcleo (Acuerdo bilateral):** Buscamos colaboradores en **Sistemas C/SIMD/Linux** (AVX2/AVX-512/NEON, `O_DIRECT`/`io_uring`) e **Investigación y Escalado ML (PyTorch)**. La mejor puerta de entrada es abrir una Issue técnica de calidad o escribir directamente a `miguelaranguren19x@outlook.com`.
 
 ---
 
 ## 9. Titularidad, Propiedad Intelectual y Licencias
 
 * **Titular Exclusivo e Inventor:** Miguel19x (`miguelaranguren19x@outlook.com`)
-* **Régimen de Licencia:** [LICENSE.txt](LICENSE.txt) — Licencia de código disponible (**Source-Available**, no de código abierto OSI) para investigación, docencia y evaluación técnica. Excluye explotación comercial directa y provisión SaaS/API sin acuerdo previo.
+* **Régimen de Licencia:** [LICENSE.txt](LICENSE.txt) — Licencia de código disponible (**Source-Available**, no de código abierto OSI) para investigación, docencia y evaluación técnica (con notificación previa para PoC de 30 días). Excluye explotación comercial directa y provisión SaaS/API sin acuerdo previo. Traducción informativa en inglés: [LICENSE-EN.md](LICENSE-EN.md).
 * **Aviso de Proyecto y Alcance:** [NOTICE.md](NOTICE.md)
 * **Directrices de Colaboración:** [CONTRIBUTING.md](CONTRIBUTING.md)
+* **Código de Conducta:** [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 * **Registro de Autores y Titulares:** [AUTHORS.md](AUTHORS.md)
 * **Historial de Versiones:** [CHANGELOG.md](CHANGELOG.md)
+* **Política de Seguridad:** [SECURITY.md](SECURITY.md)
 * **Avisos de Terceros y Código Abierto:** [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) y carpeta [licenses/](licenses/)
 * **Identidad y Memoria del Proyecto:** [docs/PROJECT_IDENTITY.md](docs/PROJECT_IDENTITY.md)
 * **Inventario de Procedencia y Cadena de Custodia:** [docs/PROVENANCE.md](docs/PROVENANCE.md)
+* **Manifiesto Criptográfico y Sello RFC 3161:** [docs/RELEASE_MANIFEST.md](docs/RELEASE_MANIFEST.md) (`docs/RELEASE_MANIFEST.md.tsr`)
 * **Registro de Asistencia por IA:** [docs/AI_ASSISTANCE.md](docs/AI_ASSISTANCE.md)
 * **Protocolo Pre-registrado Congelado:** [Protocolo pre-registrado — Basic-Lite (TRDM-v5), Fase 1.md](Protocolo%20pre-registrado%20%E2%80%94%20Basic-Lite%20(TRDM-v5),%20Fase%201.md)
 

@@ -1,7 +1,7 @@
 # Plan Técnico y Protocolo Experimental Post-Fase 5 — Basic-Lite TRACE
 
-**Titular e Inventor:** Miguel Angel Aranguren Ramirez (Miguel19x)  
-**Contacto Oficial:** `miguelaranguren19x@outlook.com` | **Contacto Legal:** `leohxone@gmail.com`  
+**Titular e Inventor:** Miguel19x  
+**Contacto Oficial:** `miguelaranguren19x@outlook.com`  
 **Licencia:** Source-Available ([LICENSE.txt](../LICENSE.txt))  
 **Estado:** `BORRADOR DE DISEÑO / CONGELADO`  
 **Dependencia obligatoria:** Cierre verificado de Fase 2 (`v1.3.0-trace`), Fase 3, Fase 4 y Fase 5 según `docs/ROADMAP_TRACE.md`.  

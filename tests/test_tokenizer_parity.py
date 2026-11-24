@@ -1,3 +1,9 @@
+# Basic-Lite TRACE
+# Copyright © 2026 Miguel19x
+# Todos los derechos reservados.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
+# Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+
 """
 Suite de Paridad y Validación Estricta para TRACETokenizer (Hito 3.1):
 1. Aislamiento estricto de dígitos (0..9 = 1 byte) y prefijo de espacio único.

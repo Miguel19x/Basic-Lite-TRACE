@@ -3,6 +3,7 @@
 # Copyright © 2026 Miguel Angel Aranguren Ramirez (Miguel19x)
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 """
 Celda de Diagnóstico y Auditoría Causal de 5 Semillas para Google Colab (Fase 2b).

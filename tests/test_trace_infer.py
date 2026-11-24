@@ -1,3 +1,9 @@
+# Basic-Lite TRACE
+# Copyright © 2026 Miguel19x
+# Todos los derechos reservados.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
+# Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+
 """
 Suite de Validación del Motor Nativo C (Hito 2.4) — Basic-Lite TRACE:
 1. Comprobación de O_DIRECT real (used_odirect == 1, sin fallback silencioso).

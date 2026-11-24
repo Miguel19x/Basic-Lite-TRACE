@@ -3,6 +3,7 @@
 # Copyright © 2026 Miguel19x
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 """
 Pruebas unitarias para HierarchicalContextManager (Niveles L1, L2 y L3 con SQLite FTS5).

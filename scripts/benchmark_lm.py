@@ -2,6 +2,7 @@
 Basic-Lite TRACE — Benchmark Riguroso de Rendimiento y Memoria de Fase 3
 Copyright © 2026 Miguel Angel Aranguren Ramirez (Miguel19x)
 Todos los derechos reservados. Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 Mide:
 - TTFT (Time To First Token) en frío para L in {256, 1024, 4096}.
