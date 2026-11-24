@@ -2,20 +2,20 @@
 # Copyright © 2026 Miguel19x
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
-import os
-import sys
 import ctypes
 import subprocess
+import sys
 from pathlib import Path
-from typing import Optional
+
 import torch
 
-_LIB_INSTANCE: Optional[ctypes.CDLL] = None
-_KERNEL_AVAILABLE: Optional[bool] = None
+_LIB_INSTANCE: ctypes.CDLL | None = None
+_KERNEL_AVAILABLE: bool | None = None
 
 
-def compile_and_load_ternary_kernel() -> Optional[ctypes.CDLL]:
+def compile_and_load_ternary_kernel() -> ctypes.CDLL | None:
     global _LIB_INSTANCE, _KERNEL_AVAILABLE
     if _LIB_INSTANCE is not None:
         return _LIB_INSTANCE
@@ -39,15 +39,12 @@ def compile_and_load_ternary_kernel() -> Optional[ctypes.CDLL]:
         except Exception:
             pass
 
-    c_path = curr_dir / "csrc" / "ternary_kernel.c"
+    proj_dir = curr_dir.parent.parent
     so_path = curr_dir / "libternary.so"
 
     try:
-        if not so_path.exists() or (c_path.exists() and c_path.stat().st_mtime > so_path.stat().st_mtime):
-            cmd = [
-                "gcc", "-O3", "-march=native", "-fopenmp", "-shared", "-fPIC",
-                str(c_path), "-o", str(so_path)
-            ]
+        if not so_path.exists():
+            cmd = ["make", "-C", str(proj_dir), "trace/ops/libternary.so"]
             res = subprocess.run(cmd, capture_output=True, text=True)
             if res.returncode != 0:
                 print(f"[Aviso] No se pudo compilar libternary.so: {res.stderr}", file=sys.stderr)
@@ -84,13 +81,21 @@ def ternary_addsub_matmul(x_int8: torch.Tensor, w_codes: torch.Tensor) -> torch.
     Retorna: [..., N] tensor int32 calculado exclusivamente por sumas y restas con OpenMP/AVX2.
     Si el kernel nativo no está disponible, realiza fallback equivalente en PyTorch.
     """
+    if x_int8.dtype != torch.int8 or w_codes.dtype != torch.int8:
+        raise ValueError(
+            f"ternary_addsub_matmul requiere tensores int8; recibido x={x_int8.dtype}, w={w_codes.dtype}"
+        )
+
     orig_shape = x_int8.shape
-    x_2d = x_int8.view(-1, orig_shape[-1]).contiguous()
+    x_2d = x_int8.reshape(-1, orig_shape[-1]).contiguous()
     w_2d = w_codes.contiguous()
 
     M, K = x_2d.shape
     N, K_w = w_2d.shape
     assert K == K_w, f"Dimensión interna K incompatible: {K} vs {K_w}"
+
+    if x_int8.device.type != "cpu" or w_codes.device.type != "cpu":
+        return torch.matmul(x_2d.to(torch.int32), w_2d.t().to(torch.int32)).reshape(*orig_shape[:-1], N)
 
     lib = compile_and_load_ternary_kernel()
     if lib is not None:
@@ -101,7 +106,7 @@ def ternary_addsub_matmul(x_int8: torch.Tensor, w_codes: torch.Tensor) -> torch.
             ctypes.c_void_p(out_2d.data_ptr()),
             M, K, N
         )
-        return out_2d.view(*orig_shape[:-1], N)
+        return out_2d.reshape(*orig_shape[:-1], N)
 
     # Fallback matemático transparente si no hay gcc/libternary.so
-    return torch.matmul(x_2d.to(torch.int32), w_2d.t().to(torch.int32)).view(*orig_shape[:-1], N)
+    return torch.matmul(x_2d.to(torch.int32), w_2d.t().to(torch.int32)).reshape(*orig_shape[:-1], N)

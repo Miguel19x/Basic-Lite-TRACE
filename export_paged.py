@@ -3,6 +3,7 @@
 # Copyright © 2026 Miguel19x
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 """
 Script canónico de exportación Paged BitCOS v1 — Basic-Lite TRACE.
@@ -11,15 +12,17 @@ Alinea filas en formato Fast a múltiplos de 32 pesos (1 vector AVX2).
 Audita y certifica la condición de '0 pesos FP32 en RAM' para BitLinear.
 """
 
-import os
 import argparse
 import hashlib
+import os
+
 import torch
 import torch.nn as nn
 
-from trace.models.causal import TRACECausalModel
+from config import HybridConfig
 from trace.layers.bitlinear import BitLinear
-from trace.serialization.paged_bitcos import PagedBitCOSSerializer, PagedBitCOSReader
+from trace.models.causal import TRACECausalModel
+from trace.serialization.paged_bitcos import PagedBitCOSReader, PagedBitCOSSerializer
 
 
 def compute_sha256(filepath: str) -> str:
@@ -52,6 +55,8 @@ def export_checkpoint(
 ):
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint no encontrado: {checkpoint_path}")
+    if page_size < 4096 or page_size % 4096 != 0:
+        raise ValueError(f"page_size debe ser múltiplo positivo de 4096 bytes, recibido: {page_size}")
 
     # Fijar obligatoriamente 2 hilos físicos para el hardware Intel Core i3-1115G4
     torch.set_num_threads(2)
@@ -65,10 +70,15 @@ def export_checkpoint(
     print("=" * 80)
 
     # 1. Cargar obligatoriamente la configuración desde ckpt["cfg"]
-    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if hasattr(torch.serialization, "safe_globals"):
+        with torch.serialization.safe_globals([HybridConfig]):
+            ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    else:
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     if "cfg" not in ckpt:
         raise KeyError("El checkpoint no contiene el campo obligatorio 'cfg'.")
-    cfg = ckpt["cfg"]
+    raw_cfg = ckpt["cfg"]
+    cfg = HybridConfig(**raw_cfg) if isinstance(raw_cfg, dict) else raw_cfg
     cfg.device = "cpu"
     cfg.cpu_threads = 2
     cfg.paged_bitcos_format = format_type
@@ -101,13 +111,15 @@ def export_checkpoint(
     if validate_load:
         print("\n--- AUDITORÍA DE MEMORIA Y RECARGA (PUERTA DE SALIDA FASE 2) ---")
         reader = PagedBitCOSReader(output_path)
-        breakdown = reader.get_accounting_breakdown()
-        print(f"  Parámetros residentes FP32 (emb, normas, sesgos, cabezal): {breakdown['resident_fp32_params_count']} ({breakdown['resident_fp32_params_bytes'] / 1024:.2f} KB)")
-        print(f"  Páginas ternarias empaquetadas (2-bit):                    {breakdown['ternary_pages_count']} ({breakdown['ternary_pages_bytes'] / 1024:.2f} KB)")
+        try:
+            breakdown = reader.get_accounting_breakdown()
+            print(f"  Parámetros residentes FP32 (emb, normas, sesgos, cabezal): {breakdown['resident_fp32_params_count']} ({breakdown['resident_fp32_params_bytes'] / 1024:.2f} KB)")
+            print(f"  Páginas ternarias empaquetadas (2-bit):                    {breakdown['ternary_pages_count']} ({breakdown['ternary_pages_bytes'] / 1024:.2f} KB)")
 
-        fresh_model = TRACECausalModel(cfg)
-        loaded = reader.load_into_model(fresh_model)
-        reader.close()
+            fresh_model = TRACECausalModel(cfg)
+            loaded = reader.load_into_model(fresh_model)
+        finally:
+            reader.close()
 
         fp32_count = count_fp32_weights_in_bitlinear(fresh_model)
         print(f"  Módulos recargados desde binario: {loaded}")

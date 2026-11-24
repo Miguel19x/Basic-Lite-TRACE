@@ -1,3 +1,9 @@
+# Basic-Lite TRACE
+# Copyright © 2026 Miguel19x
+# Todos los derechos reservados.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
+# Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+
 """
 Basic-Lite TRACE — Benchmark Formal de Inferencia Fase 2 (Hito 2.5).
 
@@ -12,27 +18,28 @@ Condiciones Mandatorias:
   - Criterio de Salida: Speedup >= 3.0x frente a la referencia PyTorch en CPU
 """
 
-import os
-os.environ["OMP_NUM_THREADS"] = "2"
-
 import copy
 import ctypes
-import sys
+import os
 import time
+from pathlib import Path
+
 import numpy as np
 import torch
-
-torch.set_num_threads(2)
 
 from data import ProceduralCompositionalDataset
 from trace.models.causal import TRACECausalModel
 
-BIN_PATH = "checkpoints/trace_s456_fase1_paged_bitcos.bin"
-PT_CKPT = "checkpoints/trace_s456_fase1_bitnet_last.pt"
-SO_PATH = "./libtrace_infer.so"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BIN_PATH = str(REPO_ROOT / "checkpoints" / "trace_s456_fase1_paged_bitcos.bin")
+PT_CKPT = str(REPO_ROOT / "checkpoints" / "trace_s456_fase1_bitnet_last.pt")
+SO_PATH = str(REPO_ROOT / "libtrace_infer.so")
 
 
 def run_benchmark():
+    os.environ.setdefault("OMP_NUM_THREADS", "2")
+    torch.set_num_threads(2)
+
     print("=" * 78)
     print("  BASIC-LITE TRACE: BENCHMARK FORMAL DE INFERENCIA FASE 2 (HITO 2.5)")
     print("=" * 78)
@@ -71,11 +78,6 @@ def run_benchmark():
     lib.trace_model_free.argtypes = [ctypes.c_void_p]
     lib.trace_model_free.restype = None
 
-    lib.trace_model_reset_profile.argtypes = []
-    lib.trace_model_reset_profile.restype = None
-    lib.trace_model_print_profile.argtypes = []
-    lib.trace_model_print_profile.restype = None
-
     lib.trace_generate_causal_two_step.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_uint8),
@@ -89,78 +91,82 @@ def run_benchmark():
     assert ret == 0, f"Error cargando motor C: {ret}"
     print(f"  [Motor C]: Cargado exitosamente desde {BIN_PATH} (0 pesos FP32 en BitLinear)")
 
-    # 3. Preparar Muestras Reales (8 dev + 8 test-composicional)
-    dev_ds = ProceduralCompositionalDataset(cfg_base, split="dev")
-    test_ds = ProceduralCompositionalDataset(cfg_base, split="test-composicional")
+    try:
+        # 3. Preparar Muestras Reales (8 dev + 8 test-composicional)
+        dev_ds = ProceduralCompositionalDataset(cfg_base, split="dev")
+        test_ds = ProceduralCompositionalDataset(cfg_base, split="test-composicional")
 
-    samples = []
-    for i in range(8):
-        p, _, _, _ = dev_ds.samples[i]
-        samples.append(("dev", p))
-    for i in range(8):
-        p, _, _, _ = test_ds.samples[i]
-        samples.append(("test-comp", p))
+        samples = []
+        for i in range(8):
+            p, _, _, _ = dev_ds.samples[i]
+            samples.append(("dev", p))
+        for i in range(8):
+            p, _, _, _ = test_ds.samples[i]
+            samples.append(("test-comp", p))
 
-    # 4. Warmup (3 iteraciones para descartar costes transitorios)
-    print("\n  [Calentamiento]: 3 muestras para estabilizar cachés y OpenMP...")
-    warmup_buf = ctypes.create_string_buffer(512)
-    for _, p_bytes in samples[:3]:
-        p_arr = (ctypes.c_uint8 * len(p_bytes))(*p_bytes)
-        lib.trace_generate_causal_two_step(model_buf, p_arr, len(p_bytes), warmup_buf, 512)
-        with torch.no_grad():
-            model_addsub.generate_causal_two_step(p_bytes)
-            model_fp32.generate_causal_two_step(p_bytes)
-
-    lib.trace_model_reset_profile()
-
-    # 5. Medición Formal
-    lat_c = []
-    lat_addsub = []
-    lat_fp32 = []
-    matches_addsub = 0
-    matches_fp32 = 0
-    total_eval = len(samples)
-
-    print(f"\n  [Evaluación Comparativa sobre {total_eval} muestras reales en 2 hilos CPU]:")
-
-    c_out_buf = ctypes.create_string_buffer(512)
-    NUM_ROUNDS = 2  # 32 ejecuciones por motor
-
-    for r in range(NUM_ROUNDS):
-        for idx, (split, p_bytes) in enumerate(samples):
-            # A. Native C Standalone Engine
+        # 4. Warmup (3 iteraciones para descartar costes transitorios)
+        print("\n  [Calentamiento]: 3 muestras para estabilizar cachés y OpenMP...")
+        warmup_buf = ctypes.create_string_buffer(512)
+        for _, p_bytes in samples[:3]:
             p_arr = (ctypes.c_uint8 * len(p_bytes))(*p_bytes)
-            t0 = time.perf_counter()
-            lib.trace_generate_causal_two_step(model_buf, p_arr, len(p_bytes), c_out_buf, 512)
-            t1 = time.perf_counter()
-            c_text = c_out_buf.value.decode("utf-8", errors="replace")
-            lat_c.append((t1 - t0) * 1000.0)
-
-            # B. PyTorch AddSub (Referencia W1.58A8)
-            t0 = time.perf_counter()
+            w_ret = lib.trace_generate_causal_two_step(model_buf, p_arr, len(p_bytes), warmup_buf, 512)
+            assert w_ret >= 0, f"Error en warmup C: {w_ret}"
             with torch.no_grad():
-                pt_text_addsub, _ = model_addsub.generate_causal_two_step(p_bytes)
-            t1 = time.perf_counter()
-            lat_addsub.append((t1 - t0) * 1000.0)
+                model_addsub.generate_causal_two_step(p_bytes)
+                model_fp32.generate_causal_two_step(p_bytes)
 
-            # C. PyTorch Continuo FP32
-            t0 = time.perf_counter()
-            with torch.no_grad():
-                pt_text_fp32, _ = model_fp32.generate_causal_two_step(p_bytes)
-            t1 = time.perf_counter()
-            lat_fp32.append((t1 - t0) * 1000.0)
+        # 5. Medición Formal
+        lat_c = []
+        lat_addsub = []
+        lat_fp32 = []
+        matches_addsub = 0
+        matches_fp32 = 0
+        total_eval = len(samples)
 
-            if r == 0:
-                m_addsub = (c_text == pt_text_addsub)
-                m_fp32 = (c_text == pt_text_fp32)
-                if m_addsub:
-                    matches_addsub += 1
-                if m_fp32:
-                    matches_fp32 += 1
-                if not m_addsub:
-                    print(f"  [DISCREPANCIA vs AddSub] Muestra {idx} ({split}):\n    C: {repr(c_text)}\n    PT: {repr(pt_text_addsub)}")
+        print(f"\n  [Evaluación Comparativa sobre {total_eval} muestras reales en 2 hilos CPU]:")
 
-    lib.trace_model_free(model_buf)
+        c_out_buf = ctypes.create_string_buffer(512)
+        NUM_ROUNDS = 2  # 32 ejecuciones por motor
+
+        for r in range(NUM_ROUNDS):
+            for idx, (split, p_bytes) in enumerate(samples):
+                # A. Native C Standalone Engine
+                p_arr = (ctypes.c_uint8 * len(p_bytes))(*p_bytes)
+                t0 = time.perf_counter()
+                gen_ret = lib.trace_generate_causal_two_step(model_buf, p_arr, len(p_bytes), c_out_buf, 512)
+                t1 = time.perf_counter()
+                assert gen_ret >= 0, f"trace_generate_causal_two_step falló con código {gen_ret}"
+                c_text = c_out_buf.value.decode("utf-8", errors="replace")
+                lat_c.append((t1 - t0) * 1000.0)
+
+                # B. PyTorch AddSub (Referencia W1.58A8)
+                t0 = time.perf_counter()
+                with torch.no_grad():
+                    pt_text_addsub, _ = model_addsub.generate_causal_two_step(p_bytes)
+                t1 = time.perf_counter()
+                lat_addsub.append((t1 - t0) * 1000.0)
+
+                # C. PyTorch Continuo FP32
+                t0 = time.perf_counter()
+                with torch.no_grad():
+                    pt_text_fp32, _ = model_fp32.generate_causal_two_step(p_bytes)
+                t1 = time.perf_counter()
+                lat_fp32.append((t1 - t0) * 1000.0)
+
+                if r == 0:
+                    m_addsub = c_text == pt_text_addsub
+                    m_fp32 = c_text == pt_text_fp32
+                    if m_addsub:
+                        matches_addsub += 1
+                    if m_fp32:
+                        matches_fp32 += 1
+                    if not m_addsub:
+                        print(
+                            f"  [DISCREPANCIA vs AddSub] Muestra {idx} ({split}):\n"
+                            f"    C: {c_text!r}\n    PT: {pt_text_addsub!r}"
+                        )
+    finally:
+        lib.trace_model_free(model_buf)
 
     # 6. Reporte Estadístico
     arr_c = np.array(lat_c)
@@ -177,21 +183,21 @@ def run_benchmark():
     throughput_addsub = 1000.0 / mean_addsub
 
     print("\n" + "-" * 78)
-    print("  RESULTADOS DE BENCHMARK (Muestras: %d, Hilos CPU: 2)" % (len(arr_c)))
+    print(f"\n  RESULTADOS DE BENCHMARK (Muestras: {len(arr_c)}, Hilos CPU: 2)")
     print("-" * 78)
-    print(f"  1. Motor C Autónomo (trace_infer AVX2 + O_DIRECT):")
+    print("  1. Motor C Autónomo (trace_infer AVX2 + O_DIRECT):")
     print(f"     - Latencia Media:   {mean_c:6.2f} ms")
     print(f"     - Latencia Mediana: {med_c:6.2f} ms")
     print(f"     - Percentil 95:     {p95_c:6.2f} ms")
     print(f"     - Throughput:       {throughput_c:6.2f} muestras/seg")
     print()
-    print(f"  2. PyTorch W1.58A8 AddSub (Referencia):")
+    print("  2. PyTorch W1.58A8 AddSub (Referencia):")
     print(f"     - Latencia Media:   {mean_addsub:6.2f} ms")
     print(f"     - Latencia Mediana: {med_addsub:6.2f} ms")
     print(f"     - Percentil 95:     {p95_addsub:6.2f} ms")
     print(f"     - Throughput:       {throughput_addsub:6.2f} muestras/seg")
     print()
-    print(f"  3. PyTorch Continuo FP32:")
+    print("  3. PyTorch Continuo FP32:")
     print(f"     - Latencia Media:   {mean_fp32:6.2f} ms")
     print(f"     - Latencia Mediana: {med_fp32:6.2f} ms")
     print(f"     - Percentil 95:     {p95_fp32:6.2f} ms")
@@ -202,11 +208,7 @@ def run_benchmark():
     print(f"  COINCIDENCIA TEXTUAL VS FP32:     {matches_fp32}/{total_eval} ({matches_fp32/total_eval*100:.1f}%)")
     print("-" * 78)
 
-    print("\n" + "=" * 78)
-    print("  DESGLOSE TEMPORAL CLOCK_MONOTONIC (HITO 2.5)")
-    print("=" * 78)
-    lib.trace_model_print_profile()
-    print("=" * 78)
+
 
     # Verificaciones mandatorias
     assert matches_addsub == total_eval, f"Fallo de coincidencia textual vs AddSub: {matches_addsub}/{total_eval}"

@@ -3,6 +3,7 @@
 # Copyright © 2026 Miguel Angel Aranguren Ramirez (Miguel19x)
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 """
 Evaluación exploratoria multi-semilla de Fase 1 (Basic-Lite TRACE).
@@ -21,7 +22,8 @@ import json
 import os
 import random
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any
+
 import numpy as np
 import torch
 
@@ -34,7 +36,7 @@ from trace.models.causal import TRACECausalModel
 torch.set_num_threads(2)
 
 
-def compute_bootstrap_ci95(values: List[float], n_bootstrap: int = 10000, seed: int = 42) -> Tuple[float, float]:
+def compute_bootstrap_ci95(values: list[float], n_bootstrap: int = 10000, seed: int = 42) -> tuple[float, float]:
     if len(values) <= 1:
         v = values[0] if values else 0.0
         return float(v), float(v)
@@ -47,7 +49,7 @@ def compute_bootstrap_ci95(values: List[float], n_bootstrap: int = 10000, seed: 
     return round(ci_low, 2), round(ci_high, 2)
 
 
-def compute_stats(vals: List[float]) -> Dict[str, Any]:
+def compute_stats(vals: list[float]) -> dict[str, Any]:
     n = len(vals)
     if n == 0:
         return {"mean": 0.0, "std": 0.0, "median": 0.0, "min": 0.0, "max": 0.0, "ci95_parametric": [0.0, 0.0], "ci95_bootstrap": [0.0, 0.0], "values": []}
@@ -74,7 +76,7 @@ def evaluate_test_comp_detailed(
     model: TRACECausalModel,
     dataset: ProceduralCompositionalDataset,
     device: torch.device,
-) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """
     Evaluación en una sola pasada de Test-Composicional.
     Calcula simultáneamente métricas base, calibración desacoplada y desglose por par no visto.
@@ -90,10 +92,10 @@ def evaluate_test_comp_detailed(
     matching_digits = 0
     total_time_ms = 0.0
 
-    all_confidences: List[float] = []
-    all_correctness: List[float] = []
-    s2_confidences: List[float] = []
-    s2_correctness: List[float] = []
+    all_confidences: list[float] = []
+    all_correctness: list[float] = []
+    s2_confidences: list[float] = []
+    s2_correctness: list[float] = []
 
     pair_perf = {f"{p}_x_{c}": {"ok": 0, "total": 0, "pct": 0.0} for p, c in ProceduralCompositionalDataset.HELD_OUT_PAIRS}
 
@@ -150,7 +152,7 @@ def evaluate_test_comp_detailed(
                         pair_perf[pair_key]["ok"] += 1
 
             expected_target_str = target_b.decode("utf-8")
-            case_correctness: List[float] = []
+            case_correctness: list[float] = []
             for s_start, s_end in digit_indices:
                 exp_sub = expected_target_str[s_start:s_end]
                 pred_sub = gen_str[s_start:s_end] if len(gen_str) >= s_end else "???"
@@ -249,10 +251,15 @@ def main():
         assert os.path.exists(path), f"Checkpoint no encontrado: {path}"
         print(f"---> Evaluando Semilla {s} ({args.variant}) desde: {path}")
         t0 = time.time()
-        ckpt = torch.load(path, map_location=device, weights_only=False)
-        
-        ckpt_cfg = ckpt.get("cfg")
-        if ckpt_cfg is not None:
+        if hasattr(torch.serialization, "safe_globals"):
+            with torch.serialization.safe_globals([HybridConfig]):
+                ckpt = torch.load(path, map_location=device, weights_only=True)
+        else:
+            ckpt = torch.load(path, map_location=device, weights_only=True)
+
+        raw_cfg = ckpt.get("cfg")
+        if raw_cfg is not None:
+            ckpt_cfg = HybridConfig(**raw_cfg) if isinstance(raw_cfg, dict) else raw_cfg
             ckpt_cfg.device = "cpu"
             ckpt_cfg.cpu_threads = 2
             model = TRACECausalModel(ckpt_cfg).to(device)

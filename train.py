@@ -3,6 +3,7 @@
 # Copyright © 2026 Miguel19x
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 """
 Basic-Lite 0.2 — Pipeline de Entrenamiento Causal de 2 Etapas
@@ -10,20 +11,20 @@ Incorpora Abacus Positional Embeddings, Desacoplamiento Causal (Subtotales -> To
 Schedule QAT de 2 Etapas (BitNet b1.58) y Telemetría de Saturación/Flips.
 """
 
-import os
-import sys
-import time
 import argparse
+import dataclasses
 import math
+import os
 import random
-from typing import List, Optional, Tuple
+import time
+
+import numpy as np
 import torch
-from torch.utils.data import DataLoader
 
 from config import HybridConfig
 from data import ProceduralCompositionalDataset
-from trace.models.causal import TRACECausalModel
 from eval import evaluate_causal
+from trace.models.causal import TRACECausalModel
 
 
 def collate_fn(batch, max_seq_len: int, pad_token_id: int, bos_token_id: int, eos_token_id: int):
@@ -41,6 +42,13 @@ def collate_fn(batch, max_seq_len: int, pad_token_id: int, bos_token_id: int, eo
     return torch.tensor(x_0_list, dtype=torch.long), plen_list
 
 
+def _load_checkpoint_safe(path: str, map_location) -> dict:
+    if hasattr(torch.serialization, "safe_globals"):
+        with torch.serialization.safe_globals([HybridConfig]):
+            return torch.load(path, map_location=map_location, weights_only=True)
+    return torch.load(path, map_location=map_location, weights_only=True)
+
+
 def train(
     steps: int = 1000,
     lr: float = 3e-4,
@@ -49,7 +57,7 @@ def train(
     device_name: str = "auto",
     eval_interval: int = 200,
     warmup_ratio: float = 0.40,
-    warmup_steps: Optional[int] = None,
+    warmup_steps: int | None = None,
     lr_warmup_steps: int = 300,
     use_bitnet_schedule: bool = False,
     lr_peak: float = 1.0e-3,
@@ -57,8 +65,18 @@ def train(
     bitlinear_wd_init: float = 0.05,
     checkpoint_out: str = "trace_checkpoint.pt",
 ):
+    if steps < 1:
+        raise ValueError(f"steps debe ser >= 1, recibido: {steps}")
+    if eval_interval < 1:
+        raise ValueError(f"eval_interval debe ser >= 1, recibido: {eval_interval}")
+    if batch_size < 1:
+        raise ValueError(f"batch_size debe ser >= 1, recibido: {batch_size}")
+
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     random.seed(seed)
+    np.random.seed(seed)
     if device_name == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -149,7 +167,7 @@ def train(
                 pg["lr"] = curr_lr
 
             # En la segunda mitad del entrenamiento (Fase 2), bajar decay de shadow weights a 0.0
-            if step >= (steps // 2):
+            if step > (steps // 2):
                 for pg in optimizer.param_groups:
                     if pg.get("name") == "bitlinear_shadow":
                         pg["weight_decay"] = 0.0
@@ -228,7 +246,7 @@ def train(
                     {
                         "step": step,
                         "model_state": model.state_dict(),
-                        "cfg": cfg,
+                        "cfg": dataclasses.asdict(cfg),
                         "best_dev_em": best_dev_em,
                         "best_dev_score": best_dev_score,
                         "dev_metrics": dev_metrics,
@@ -249,12 +267,13 @@ def train(
     print("=" * 80)
 
     # Guardar siempre el último estado al finalizar
-    last_ckpt_path = checkpoint_out.replace(".pt", "_last.pt")
+    ckpt_root, ckpt_ext = os.path.splitext(checkpoint_out)
+    last_ckpt_path = f"{ckpt_root}_last{ckpt_ext or '.pt'}"
     torch.save(
         {
             "step": steps,
             "model_state": model.state_dict(),
-            "cfg": cfg,
+            "cfg": dataclasses.asdict(cfg),
             "dev_metrics": dev_metrics,
         },
         last_ckpt_path,
@@ -264,7 +283,7 @@ def train(
     # Evaluación final en Test-Composicional
     print("\n--- EVALUACIÓN FINAL EN TEST-COMPOSICIONAL (480 casos) ---")
     if os.path.exists(checkpoint_out):
-        ckpt = torch.load(checkpoint_out, map_location=device, weights_only=False)
+        ckpt = _load_checkpoint_safe(checkpoint_out, map_location=device)
         model.load_state_dict(ckpt["model_state"])
     comp_metrics = evaluate_causal(model, test_comp_dataset, device)
     print(

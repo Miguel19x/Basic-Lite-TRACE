@@ -2,9 +2,10 @@
 # Copyright © 2026 Miguel19x
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+
 import torch
 
 
@@ -15,11 +16,11 @@ class ModelOutput:
     Permite desacoplar proyecciones de vocabulario, estados latentes y telemetría.
     """
     final_logits: torch.Tensor
-    intermediate_logits: List[torch.Tensor] = field(default_factory=list)
-    halt_probs: List[torch.Tensor] = field(default_factory=list)
-    kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = field(default_factory=list)
-    carried_states: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-    last_hidden_state: Optional[torch.Tensor] = None
+    intermediate_logits: list[torch.Tensor] = field(default_factory=list)
+    halt_probs: list[torch.Tensor] = field(default_factory=list)
+    kv_caches: list[tuple[torch.Tensor, torch.Tensor]] = field(default_factory=list)
+    carried_states: tuple[torch.Tensor, torch.Tensor] | None = None
+    last_hidden_state: torch.Tensor | None = None
 
     # Compatibilidad con desempaquetado de tupla clásico:
     # final_logits, intermediate_logits, halt_probs, kv_caches, carried_states = model(...)

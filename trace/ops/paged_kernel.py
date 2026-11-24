@@ -2,24 +2,30 @@
 # Copyright © 2026 Miguel19x
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 import struct
 import time
-from typing import Dict, Tuple
+from typing import Any
+
 import numpy as np
 import torch
 
 
-def unpack_page_to_dense(page_bytes: bytes) -> Tuple[int, int, int, float, torch.Tensor]:
+def unpack_page_to_dense(page_bytes: bytes) -> tuple[int, int, int, float, torch.Tensor]:
     """
     Decodifica una página binaria Paged BitCOS a un tensor denso int8 {-1, 0, +1}.
     Retorna: (row_start, rows, cols, scale_w, codes_tensor)
     """
     header_fmt = "<IIHHfII"
     header_size = struct.calcsize(header_fmt)
+    if len(page_bytes) < header_size:
+        raise ValueError(f"Página truncada: {len(page_bytes)} < {header_size} bytes")
     row_start, rows, cols, fmt_code, scale_w, len_p1, len_p2 = struct.unpack(
         header_fmt, page_bytes[:header_size]
     )
+    if fmt_code not in (0, 1):
+        raise ValueError(f"fmt_code inválido en página Paged BitCOS: {fmt_code} (esperado 0 o 1)")
     offset = header_size
 
     total_weights = rows * cols
@@ -56,7 +62,7 @@ def unpack_page_to_dense(page_bytes: bytes) -> Tuple[int, int, int, float, torch
 def paged_direct_block_matmul(
     q_x_int8: torch.Tensor,
     page_bytes: bytes,
-) -> Tuple[int, int, float, torch.Tensor]:
+) -> tuple[int, int, float, torch.Tensor]:
     """
     Ejecuta la multiplicación de la página empaquetada contra activaciones INT8
     sin reconstruir todo el tensor en FP32.
@@ -68,6 +74,8 @@ def paged_direct_block_matmul(
       Acumulador INT32
     Retorna: (row_start, rows, scale_w, acc_int32 [B, rows])
     """
+    if q_x_int8.device.type != "cpu":
+        raise ValueError(f"paged_direct_block_matmul requiere tensor en CPU, recibido: {q_x_int8.device}")
     row_start, rows, cols, scale_w, codes = unpack_page_to_dense(page_bytes)
     # Matmul aditiva/entera directa sobre el bloque de página
     if q_x_int8.dim() == 1:
@@ -85,7 +93,7 @@ def benchmark_packed_vs_dense(
     out_features: int = 384,
     page_size: int = 4096,
     num_runs: int = 50,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Compara de forma estricta:
     1. Reconstrucción completa en FP32 + GEMM convencional
@@ -100,7 +108,6 @@ def benchmark_packed_vs_dense(
     torch.manual_seed(42)
     raw_weights = torch.randint(-1, 2, (out_features, in_features), dtype=torch.int8)
     scale_w = 0.05
-    dense_w_fp32 = raw_weights.to(torch.float32) * scale_w
 
     # Generar activaciones de prueba
     x_fp32 = torch.randn(batch_size, in_features)
@@ -110,19 +117,24 @@ def benchmark_packed_vs_dense(
     # Serializar páginas en ambos formatos
     pages_compact = []
     pages_fast = []
-    rows_per_page = max(1, (page_size - 64) // max(1, int(in_features * 0.25) + 4))
+    rows_per_page_compact = max(1, (page_size - 64) // max(1, int(in_features * 0.25) + 4))
+    padded_in_f = ((in_features + 31) // 32) * 32
+    rows_per_page_fast = max(1, (page_size - 64) // (padded_in_f // 4))
 
-    for r_start in range(0, out_features, rows_per_page):
-        r_end = min(out_features, r_start + rows_per_page)
+    for r_start in range(0, out_features, rows_per_page_compact):
+        r_end = min(out_features, r_start + rows_per_page_compact)
         chunk = raw_weights[r_start:r_end, :].numpy()
-
         p_c = PagedBitCOSSerializer.pack_ternary_page(
             r_start, out_features, in_features, scale_w, chunk, page_size, "compact"
         )
+        pages_compact.append(p_c)
+
+    for r_start in range(0, out_features, rows_per_page_fast):
+        r_end = min(out_features, r_start + rows_per_page_fast)
+        chunk = raw_weights[r_start:r_end, :].numpy()
         p_f = PagedBitCOSSerializer.pack_ternary_page(
             r_start, out_features, in_features, scale_w, chunk, page_size, "fast"
         )
-        pages_compact.append(p_c)
         pages_fast.append(p_f)
 
     # 1. Baseline: Reconstrucción completa en FP32 + Matmul Convencional
@@ -185,7 +197,7 @@ def verify_integer_accumulators_exact_equality(
     in_features: int = 192,
     batch_size: int = 4,
     page_size: int = 4096,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Verifica la corrección de implementación estricta (Punto 2.A del Auditor):
     Compara los acumuladores enteros INT32 ANTES de aplicar cualquier escala flotante
@@ -202,15 +214,24 @@ def verify_integer_accumulators_exact_equality(
     acc_ref = torch.matmul(q_x.to(torch.int32), w_ref.to(torch.int32).t())
 
     # 2. Empaquetar páginas
-    rows_per_page = max(1, (page_size - 64) // max(1, int(in_features * 0.25) + 4))
+    rows_per_page_compact = max(1, (page_size - 64) // max(1, int(in_features * 0.25) + 4))
+    padded_in_f = ((in_features + 31) // 32) * 32
+    rows_per_page_fast = max(1, (page_size - 64) // (padded_in_f // 4))
     pages_compact = []
     pages_fast = []
-    for r_start in range(0, out_features, rows_per_page):
-        r_end = min(out_features, r_start + rows_per_page)
+    for r_start in range(0, out_features, rows_per_page_compact):
+        r_end = min(out_features, r_start + rows_per_page_compact)
         chunk = w_ref[r_start:r_end, :].numpy()
-        p_c = PagedBitCOSSerializer.pack_ternary_page(r_start, out_features, in_features, 1.0, chunk, page_size, "compact")
-        p_f = PagedBitCOSSerializer.pack_ternary_page(r_start, out_features, in_features, 1.0, chunk, page_size, "fast")
+        p_c = PagedBitCOSSerializer.pack_ternary_page(
+            r_start, out_features, in_features, 1.0, chunk, page_size, "compact"
+        )
         pages_compact.append(p_c)
+    for r_start in range(0, out_features, rows_per_page_fast):
+        r_end = min(out_features, r_start + rows_per_page_fast)
+        chunk = w_ref[r_start:r_end, :].numpy()
+        p_f = PagedBitCOSSerializer.pack_ternary_page(
+            r_start, out_features, in_features, 1.0, chunk, page_size, "fast"
+        )
         pages_fast.append(p_f)
 
     # 3. Acumuladores de ruta Compact
@@ -244,7 +265,7 @@ def benchmark_against_resident_fp32_timer(
     batch_size: int = 1,
     page_size: int = 4096,
     num_threads: int = 2,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Compara mediante torch.utils.benchmark.Timer con hilos fijos, calentamiento y réplicas:
     1. Matriz FP32 YA RESIDENTE en memoria RAM (lista en memoria, sin reconstrucción).
@@ -252,78 +273,99 @@ def benchmark_against_resident_fp32_timer(
     3. Ejecución Paginada Directa en Formato Compact.
     """
     import torch.utils.benchmark as benchmark
+
     from trace.serialization.paged_bitcos import PagedBitCOSSerializer
 
+    prev_threads = torch.get_num_threads()
     torch.set_num_threads(num_threads)
-    torch.manual_seed(42)
+    try:
+        torch.manual_seed(42)
 
-    w_ref = torch.randint(-1, 2, (out_features, in_features), dtype=torch.int8)
-    scale_w = 0.05
-    w_resident_fp32 = w_ref.to(torch.float32) * scale_w
-    x_fp32 = torch.randn(batch_size, in_features)
-    q_x = torch.clamp(torch.round(x_fp32 * (127.0 / 2.0)), -127, 127).to(torch.int8)
+        w_ref = torch.randint(-1, 2, (out_features, in_features), dtype=torch.int8)
+        scale_w = 0.05
+        w_resident_fp32 = w_ref.to(torch.float32) * scale_w
+        x_fp32 = torch.randn(batch_size, in_features)
+        q_x = torch.clamp(torch.round(x_fp32 * (127.0 / 2.0)), -127, 127).to(torch.int8)
 
-    rows_per_page = max(1, (page_size - 64) // max(1, int(in_features * 0.25) + 4))
-    pages_fast = []
-    pages_compact = []
-    for r_start in range(0, out_features, rows_per_page):
-        r_end = min(out_features, r_start + rows_per_page)
-        chunk = w_ref[r_start:r_end, :].numpy()
-        pages_fast.append(PagedBitCOSSerializer.pack_ternary_page(r_start, out_features, in_features, scale_w, chunk, page_size, "fast"))
-        pages_compact.append(PagedBitCOSSerializer.pack_ternary_page(r_start, out_features, in_features, scale_w, chunk, page_size, "compact"))
+        rows_per_page_compact = max(1, (page_size - 64) // max(1, int(in_features * 0.25) + 4))
+        padded_in_f = ((in_features + 31) // 32) * 32
+        rows_per_page_fast = max(1, (page_size - 64) // (padded_in_f // 4))
+        pages_fast = []
+        pages_compact = []
+        for r_start in range(0, out_features, rows_per_page_fast):
+            r_end = min(out_features, r_start + rows_per_page_fast)
+            chunk = w_ref[r_start:r_end, :].numpy()
+            pages_fast.append(
+                PagedBitCOSSerializer.pack_ternary_page(
+                    r_start, out_features, in_features, scale_w, chunk, page_size, "fast"
+                )
+            )
+        for r_start in range(0, out_features, rows_per_page_compact):
+            r_end = min(out_features, r_start + rows_per_page_compact)
+            chunk = w_ref[r_start:r_end, :].numpy()
+            pages_compact.append(
+                PagedBitCOSSerializer.pack_ternary_page(
+                    r_start, out_features, in_features, scale_w, chunk, page_size, "compact"
+                )
+            )
 
-    # Función auxiliar para ejecución rápida
-    def run_resident_fp32():
-        return torch.matmul(x_fp32, w_resident_fp32.t())
+        # Función auxiliar para ejecución rápida
+        def run_resident_fp32():
+            return torch.matmul(x_fp32, w_resident_fp32.t())
 
-    def run_paged_fast():
-        out = torch.empty(batch_size, out_features, dtype=torch.float32)
-        for p in pages_fast:
-            r_s, r_cnt, sc, acc = paged_direct_block_matmul(q_x, p)
-            out[:, r_s : r_s + r_cnt] = acc.to(torch.float32) * sc
-        return out
+        def run_paged_fast():
+            out = torch.empty(batch_size, out_features, dtype=torch.float32)
+            for p in pages_fast:
+                r_s, r_cnt, sc, acc = paged_direct_block_matmul(q_x, p)
+                out[:, r_s : r_s + r_cnt] = acc.to(torch.float32) * sc
+            return out
 
-    def run_paged_compact():
-        out = torch.empty(batch_size, out_features, dtype=torch.float32)
-        for p in pages_compact:
-            r_s, r_cnt, sc, acc = paged_direct_block_matmul(q_x, p)
-            out[:, r_s : r_s + r_cnt] = acc.to(torch.float32) * sc
-        return out
+        def run_paged_compact():
+            out = torch.empty(batch_size, out_features, dtype=torch.float32)
+            for p in pages_compact:
+                r_s, r_cnt, sc, acc = paged_direct_block_matmul(q_x, p)
+                out[:, r_s : r_s + r_cnt] = acc.to(torch.float32) * sc
+            return out
 
-    timer_res = benchmark.Timer(
-        stmt="run_resident_fp32()",
-        globals={"run_resident_fp32": run_resident_fp32},
-        num_threads=num_threads,
-    ).blocked_autorange(min_run_time=0.2)
+        timer_res = benchmark.Timer(
+            stmt="run_resident_fp32()",
+            globals={"run_resident_fp32": run_resident_fp32},
+            num_threads=num_threads,
+        ).blocked_autorange(min_run_time=0.2)
 
-    timer_fast = benchmark.Timer(
-        stmt="run_paged_fast()",
-        globals={"run_paged_fast": run_paged_fast},
-        num_threads=num_threads,
-    ).blocked_autorange(min_run_time=0.2)
+        timer_fast = benchmark.Timer(
+            stmt="run_paged_fast()",
+            globals={"run_paged_fast": run_paged_fast},
+            num_threads=num_threads,
+        ).blocked_autorange(min_run_time=0.2)
 
-    timer_compact = benchmark.Timer(
-        stmt="run_paged_compact()",
-        globals={"run_paged_compact": run_paged_compact},
-        num_threads=num_threads,
-    ).blocked_autorange(min_run_time=0.2)
+        timer_compact = benchmark.Timer(
+            stmt="run_paged_compact()",
+            globals={"run_paged_compact": run_paged_compact},
+            num_threads=num_threads,
+        ).blocked_autorange(min_run_time=0.2)
 
-    med_fp32_us = timer_res.median * 1e6
-    med_fast_us = timer_fast.median * 1e6
-    med_compact_us = timer_compact.median * 1e6
+        med_fp32_us = timer_res.median * 1e6
+        med_fast_us = timer_fast.median * 1e6
+        med_compact_us = timer_compact.median * 1e6
 
-    iqr_fp32_us = timer_res.iqr * 1e6
-    iqr_fast_us = timer_fast.iqr * 1e6
-    iqr_compact_us = timer_compact.iqr * 1e6
+        iqr_fp32_us = timer_res.iqr * 1e6
+        iqr_fast_us = timer_fast.iqr * 1e6
+        iqr_compact_us = timer_compact.iqr * 1e6
 
-    return {
-        "threads": num_threads,
-        "fp32_resident_median_us": round(med_fp32_us, 2),
-        "fp32_resident_iqr_us": round(iqr_fp32_us, 2),
-        "paged_fast_median_us": round(med_fast_us, 2),
-        "paged_fast_iqr_us": round(iqr_fast_us, 2),
-        "paged_compact_median_us": round(med_compact_us, 2),
-        "paged_compact_iqr_us": round(iqr_compact_us, 2),
-        "ratio_paged_fast_vs_resident_fp32": round(med_fast_us / max(1e-6, med_fp32_us), 2),
-        "note": "FP32 residente ya tiene los pesos en memoria RAM consumiendo 4 bytes/peso; Paged BitCOS opera con páginas de 2 bits por peso.",
-    }
+        return {
+            "threads": num_threads,
+            "fp32_resident_median_us": round(med_fp32_us, 2),
+            "fp32_resident_iqr_us": round(iqr_fp32_us, 2),
+            "paged_fast_median_us": round(med_fast_us, 2),
+            "paged_fast_iqr_us": round(iqr_fast_us, 2),
+            "paged_compact_median_us": round(med_compact_us, 2),
+            "paged_compact_iqr_us": round(iqr_compact_us, 2),
+            "ratio_paged_fast_vs_resident_fp32": round(med_fast_us / max(1e-6, med_fp32_us), 2),
+            "note": (
+                "FP32 residente ya tiene los pesos en memoria RAM consumiendo 4 bytes/peso; "
+                "Paged BitCOS opera con páginas de 2 bits por peso."
+            ),
+        }
+    finally:
+        torch.set_num_threads(prev_threads)

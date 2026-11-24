@@ -1,3 +1,9 @@
+# Basic-Lite TRACE
+# Copyright © 2026 Miguel19x
+# Todos los derechos reservados.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
+# Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+
 """
 Suite de Higiene y Contratos E0 para TRACECausalModel:
 - E0.1 Causalidad Temporal Diferenciable: d(logits_prompt) / d(target_embed) == 0.0.
@@ -6,15 +12,15 @@ Suite de Higiene y Contratos E0 para TRACECausalModel:
   exactamente (diff <= 1e-5) cuando la muestra se procesa dentro de un lote heterogéneo.
 """
 import torch
-import torch.nn as nn
+
 from config import HybridConfig
-from trace.models.causal import TRACECausalModel
 from data import ProceduralCompositionalDataset
+from trace.models.causal import TRACECausalModel
 from train import collate_fn
 
 
 def test_e0_1_prompt_causality():
-    """Verifica que el prompt no atienda a la región de target."""
+    """Verifica en todas las etapas (0..3) que el prompt no atienda al target y sí reciba gradiente no-nulo."""
     torch.manual_seed(42)
     cfg = HybridConfig(device="cpu", num_recursions=1, adaptive_recursion=False)
     model = TRACECausalModel(cfg)
@@ -29,32 +35,40 @@ def test_e0_1_prompt_causality():
     x = torch.tensor([seq], dtype=torch.long)
     t = torch.ones(1)
 
-    # Enganchar gradientes en los embeddings continuos
-    emb_grad = []
-    def hook_fn(module, inp, out):
-        out.retain_grad()
-        emb_grad.append(out)
-
-    handle = model.token_emb.register_forward_hook(hook_fn)
-    model.zero_grad()
-
-    # Reconstruir máscara causal unificada
     from trace.modules.attention import build_target_unified_mask
+
     attn_mask = build_target_unified_mask([plen], cfg.max_seq_len, cfg.block_size, torch.device("cpu"))
 
-    with torch.enable_grad():
-        logits = model.forward_backbone(x, t, stage_id=0, attn_mask=attn_mask)
-        # Sumar logits de la región de prompt (0..plen-1)
-        loss = logits[:, :plen, :].sum()
-        loss.backward()
+    for stage_id in (0, 1, 2, 3):
+        emb_grad = []
 
-    handle.remove()
-    emb = emb_grad[0]
-    # El gradiente sobre los tokens de target (plen..) debe ser exactamente 0.0
-    target_grad = emb.grad[:, plen:, :]
-    max_leakage = target_grad.abs().max().item()
+        def hook_fn(module, inp, out):
+            out.retain_grad()
+            emb_grad.append(out)
 
-    assert max_leakage == 0.0, f"Fuga causal detectada: gradiente máximo de {max_leakage} en región de target."
+        handle = model.token_emb.register_forward_hook(hook_fn)
+        try:
+            model.zero_grad()
+            with torch.enable_grad():
+                logits = model.forward_backbone(x, t, stage_id=stage_id, attn_mask=attn_mask)
+                # Sumar logits de la región de prompt (0..plen-1)
+                loss = logits[:, :plen, :].sum()
+                loss.backward()
+        finally:
+            handle.remove()
+
+        emb = emb_grad[0]
+        prompt_grad = emb.grad[:, :plen, :]
+        target_grad = emb.grad[:, plen:, :]
+        max_prompt_grad = prompt_grad.abs().max().item()
+        max_leakage = target_grad.abs().max().item()
+
+        assert max_prompt_grad > 0.0, (
+            f"Falso positivo en etapa {stage_id}: gradiente sobre el prompt es estrictamente 0.0."
+        )
+        assert max_leakage == 0.0, (
+            f"Fuga causal detectada en etapa {stage_id}: gradiente máximo de {max_leakage} en región de target."
+        )
 
 
 def test_e0_3_batch_independence():

@@ -3,6 +3,7 @@
 # Copyright © 2026 Miguel Angel Aranguren Ramirez (Miguel19x)
 # Todos los derechos reservados.
 # Véanse LICENSE.txt y THIRD_PARTY_NOTICES.md.
+# SPDX-License-Identifier: LicenseRef-Basic-Lite-TRACE-Source-Available
 
 """
 Script de consolidación, evaluación rigurosa y reporte comparativo de 5 semillas.
@@ -24,13 +25,14 @@ if current_dir not in sys.path:
 
 import json
 import time
+
 import numpy as np
 import torch
 
 from config import HybridConfig
 from data import ProceduralCompositionalDataset
-from trace.models.causal import TRACECausalModel
 from eval import evaluate_causal
+from trace.models.causal import TRACECausalModel
 
 
 def compute_ci95(vals):
@@ -49,6 +51,8 @@ def compute_ci95(vals):
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cpu":
+        torch.set_num_threads(2)
     seeds = [42, 123, 456, 789, 999]
 
     print("=" * 85)
@@ -73,8 +77,20 @@ def main():
                 continue
 
         print(f"\n---> Cargando y evaluando Semilla {s} desde: {ckpt_path}")
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-        model = TRACECausalModel(cfg).to(device)
+        if hasattr(torch.serialization, "safe_globals"):
+            with torch.serialization.safe_globals([HybridConfig]):
+                ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+        else:
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+        raw_cfg = ckpt.get("cfg")
+        if raw_cfg is not None:
+            model_cfg = HybridConfig(**raw_cfg) if isinstance(raw_cfg, dict) else raw_cfg
+            model_cfg.device = str(device)
+            if device.type == "cpu":
+                model_cfg.cpu_threads = 2
+        else:
+            model_cfg = cfg
+        model = TRACECausalModel(model_cfg).to(device)
         model.load_state_dict(ckpt["model_state"])
         model.eval()
 
@@ -121,7 +137,7 @@ def main():
     b_em, b_ci_em, b_sp, b_ci_sp = 5.122, 6.059, 81.876, 12.585
     if has_baseline:
         try:
-            with open(baseline_path, "r", encoding="utf-8") as f:
+            with open(baseline_path, encoding="utf-8") as f:
                 b_data = json.load(f)
                 b_em = b_data["aggregate_summary"]["test_comp_exact_match_pct"]["mean"]
                 b_ci_em = b_data["aggregate_summary"]["test_comp_exact_match_pct"]["ci95"]

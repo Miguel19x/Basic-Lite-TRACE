@@ -3,21 +3,30 @@ venv/
 env/
 .env/
 
-# Python cache and bytecode
+# Python cache, packaging and tooling
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
 
 # C++ build artifacts
 *.o
 *.so
 trace_infer
+trace_lm
 .ninja*
 
 # Checkpoints y binarios de modelos
 *.pt
 *.bin
 *.zip
+*.jsonl
+checkpoints/
+checkpoints/*
 output/
 context_archive.db
 *.db-journal

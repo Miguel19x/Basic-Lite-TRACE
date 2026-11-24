@@ -33,7 +33,7 @@ El proyecto representa una línea de investigación experimental continua sin fr
 * **Empaquetado binario:** Primer formato `bitcos.bin` y hallazgos diagnósticos sobre el sobreajuste de longitud fija.
 
 ### 2.2. Fase de Consolidación y Convergencia: Hacia la Arquitectura TRACE
-* **Protocolo Pre-registrado Congelado:** Redacción del protocolo experimental en Fase 1 ([Protocolo pre-registrado — Basic-Lite (TRDM-v5), Fase 1.md](../Protocolo%20pre-registrado%20%E2%80%94%20Basic-Lite%20(TRDM-v5),%20Fase%201.md)).
+* **Evaluación Confirmatoria de Fase 1:** Definición de criterios reproducibles, higiene E0 y evaluación multi-semilla (etiqueta histórica `prereg-v1`).
 * **Paged BitCOS v1:** Paginación de tensores W1.58 alineada estrictamente a 4096 bytes del kernel Linux ([trace/serialization/paged_bitcos.py](../trace/serialization/paged_bitcos.py)) y kernel C fusionado ([paged_gemm_kernel.c](../paged_gemm_kernel.c)).
 * **Enrutamiento MoE Consciente de NVMe:** Ruteo penalizado por latencia de E/S con *buddy routing* ([trace/modules/paged_moe.py](../trace/modules/paged_moe.py)).
 * **Campo Causal Desacoplado en 2 Etapas con `detach()`:** Reemplazo de la difusión discreta pura por el campo causal en dos etapas ([trace/models/causal.py](../trace/models/causal.py)), resolviendo la multiplicación al $81.88\%$ y rompiendo la nulidad en Full-EM ($5.12\% \pm 4.88\%$).

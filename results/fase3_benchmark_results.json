@@ -1,0 +1,128 @@
+{
+  "hardware": "Intel Core i3-1115G4 (2 threads)",
+  "variants": {
+    "trace_c_int8": {
+      "variant": "trace_c_int8",
+      "peak_rss_mb": 82.07,
+      "results": {
+        "256": {
+          "ttft_ms": 391.51,
+          "decode_tok_per_sec": 254.3
+        },
+        "1024": {
+          "ttft_ms": 4345.63,
+          "decode_tok_per_sec": 92.46
+        },
+        "4096": {
+          "ttft_ms": 56947.44,
+          "decode_tok_per_sec": 32.19
+        }
+      }
+    },
+    "trace_c_fp32": {
+      "variant": "trace_c_fp32",
+      "peak_rss_mb": 101.46,
+      "results": {
+        "256": {
+          "ttft_ms": 456.95,
+          "decode_tok_per_sec": 215.8
+        },
+        "1024": {
+          "ttft_ms": 4132.26,
+          "decode_tok_per_sec": 105.8
+        },
+        "4096": {
+          "ttft_ms": 57996.02,
+          "decode_tok_per_sec": 30.09
+        }
+      }
+    },
+    "pytorch_trace": {
+      "variant": "pytorch_trace",
+      "peak_rss_mb": 2854.64,
+      "results": {
+        "256": {
+          "ttft_ms": 283.83,
+          "decode_tok_per_sec": 48.41
+        },
+        "1024": {
+          "ttft_ms": 1828.74,
+          "decode_tok_per_sec": 40.81
+        },
+        "4096": {
+          "ttft_ms": 23886.15,
+          "decode_tok_per_sec": 23.4
+        }
+      }
+    },
+    "pytorch_mha": {
+      "variant": "pytorch_mha",
+      "peak_rss_mb": 1836.14,
+      "results": {
+        "256": {
+          "ttft_ms": 138.58,
+          "decode_tok_per_sec": 85.31
+        },
+        "1024": {
+          "ttft_ms": 1164.36,
+          "decode_tok_per_sec": 42.72
+        },
+        "4096": {
+          "ttft_ms": 13878.51,
+          "decode_tok_per_sec": 18.37
+        }
+      }
+    }
+  },
+  "prefix_caching": {
+    "cold_ttft_ms": 462.84,
+    "cases": {
+      "50%": {
+        "cached_tokens": 128,
+        "processed_tokens": 128,
+        "ttft_ms": 294.39,
+        "speedup": 1.57
+      },
+      "75%": {
+        "cached_tokens": 192,
+        "processed_tokens": 64,
+        "ttft_ms": 145.1,
+        "speedup": 3.19
+      },
+      "90%": {
+        "cached_tokens": 230,
+        "processed_tokens": 26,
+        "ttft_ms": 77.87,
+        "speedup": 5.94
+      }
+    }
+  },
+  "kv_cache_analytics": {
+    "bytes_per_token": {
+      "TRACE_MLA_INT8": 3120,
+      "TRACE_MLA_FP32": 7680,
+      "CANONICAL_MHA_FP32": 49152
+    },
+    "compression_vs_mha": {
+      "TRACE_MLA_INT8": 15.75,
+      "TRACE_MLA_FP32": 6.4
+    },
+    "total_kv_mb_at_context": {
+      "256": {
+        "MLA_INT8": 0.76,
+        "MLA_FP32": 1.88,
+        "MHA_FP32": 12.0
+      },
+      "1024": {
+        "MLA_INT8": 3.05,
+        "MLA_FP32": 7.5,
+        "MHA_FP32": 48.0
+      },
+      "4096": {
+        "MLA_INT8": 12.19,
+        "MLA_FP32": 30.0,
+        "MHA_FP32": 192.0
+      }
+    }
+  }
+}
