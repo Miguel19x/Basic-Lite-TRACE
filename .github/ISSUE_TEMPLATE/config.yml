@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Reporte privado de vulnerabilidades de seguridad
+    url: https://github.com/Miguel19x/Basic-Lite-TRACE/blob/main/SECURITY.md
+    about: Nunca publiques vulnerabilidades de memoria o C en issues públicas; consulta SECURITY.md.
+  - name: Consultas comerciales, PoC (30 días) y equipo núcleo
+    url: https://github.com/Miguel19x/Basic-Lite-TRACE/blob/main/LICENSE.txt
+    about: Para notificar el inicio de una evaluación empresarial (PoC) o solicitar licencia comercial, escribe a miguelaranguren19x@outlook.com.

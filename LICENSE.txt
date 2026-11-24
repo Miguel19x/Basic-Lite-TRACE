@@ -38,9 +38,15 @@ para ejercer exclusivamente los siguientes derechos y bajo las condiciones aquí
 4. EVALUACIÓN TÉCNICA EMPRESARIAL (PRUEBA DE CONCEPTO):
    Instalar y ejecutar el software en infraestructura propia de organizaciones comerciales,
    empleando datos de prueba o datos reales en un entorno aislado, durante un plazo máximo
-   de treinta (30) días naturales desde su primera instalación, con el único fin de evaluar
-   la viabilidad técnica de la tecnología. Transcurrido dicho plazo sin acuerdo comercial
-   escrito con Miguel19x, la organización deberá cesar su uso y eliminar todas las copias.
+   de treinta (30) días naturales, con el único fin de evaluar la viabilidad técnica de la
+   tecnología.
+   REQUISITO DE ACTIVACIÓN: Para que esta autorización de evaluación sea válida, la
+   organización comercial deberá notificar previamente por escrito el inicio de la prueba
+   al correo miguelaranguren19x@outlook.com, indicando la fecha de comienzo y la entidad
+   evaluadora. El plazo de treinta (30) días naturales se computará desde dicha notificación
+   o, en ausencia de ésta, el uso empresarial carecerá de autorización desde el primer día.
+   Transcurrido dicho plazo sin acuerdo comercial escrito con Miguel19x, la organización
+   deberá cesar su uso y eliminar todas las copias.
    LÍMITES OPERATIVOS: Esta autorización permite elaborar informes técnicos internos y valorar
    la adopción o contratación de la tecnología. No permite utilizar los resultados, predicciones
    o procesos del software para atender a clientes, prestar servicios a terceros, integrar el
@@ -83,7 +89,11 @@ CONDICIONES GENERALES Y RESERVAS:
 
 * RESERVA DE PESOS, MINERÍA DE DATOS Y ENTRENAMIENTO O DESTILACIÓN DE IA:
   Las restricciones de esta licencia aplican íntegramente al código fuente, kernels nativos,
-  pesos entrenados, checkpoints y artefactos serializados (incluyendo formatos Paged BitCOS).
+  pesos entrenados, checkpoints y artefactos serializados (incluyendo archivos en formato
+  Paged BitCOS) creados, entrenados o distribuidos por Miguel19x. La conversión o ejecución
+  de pesos o modelos de terceros mediante el motor o el formato Paged BitCOS no atribuye a
+  Miguel19x titularidad sobre dichos modelos externos ni altera sus licencias originales,
+  siendo responsabilidad del usuario cumplir los términos de cada proveedor externo.
   De conformidad con el Artículo 4(3) de la Directiva (UE) 2019/790 y normativas aplicables,
   el titular formula reserva expresa de los derechos de reproducción y extracción para minería
   de textos, datos, entrenamiento, ajuste fino (fine-tuning) o destilación de modelos de
@@ -104,9 +114,24 @@ CONDICIONES GENERALES Y RESERVAS:
   de todas las autorizaciones concedidas al infractor, sin perjuicio de las acciones legales
   y reclamaciones de indemnización que correspondan al titular.
 
-* COMPONENTES DE TERCEROS:
-  Las librerías y dependencias externas se rigen por sus respectivas licencias originales,
-  recogidas en THIRD_PARTY_NOTICES.md.
+* COMPONENTES Y MODELOS DE TERCEROS:
+  Las librerías, dependencias externas y modelos o pesos preentrenados de terceros se rigen
+  exclusivamente por sus respectivas licencias originales, recogidas en THIRD_PARTY_NOTICES.md.
+
+* DIVISIBILIDAD (SALVAGUARDA):
+  Si cualquier disposición de esta licencia fuera declarada nula, ilegal o inaplicable por
+  un tribunal competente en una jurisdicción determinada, dicha disposición se aplicará en
+  la máxima medida permitida por la ley y el resto de las disposiciones de esta licencia
+  permanecerán en pleno vigor y efecto sin verse afectadas.
+
+* LEY APLICABLE, JURISDICCIÓN E IDIOMA PREVALENTE:
+  Esta licencia se interpretará y regirá de conformidad con la legislación de propiedad
+  intelectual aplicable en el domicilio del titular y los tratados internacionales vigentes
+  (incluyendo el Convenio de Berna y el Acuerdo sobre los ADPIC de la OMPI), sometiéndose
+  las partes a los tribunales competentes del domicilio del titular, sin perjuicio de las
+  normas imperativas aplicables. La versión en idioma español contenida en LICENSE.txt
+  constituye el único texto jurídicamente vinculante; cualquier traducción (incluyendo
+  LICENSE-EN.md) se ofrece únicamente con fines informativos de referencia.
 
 NATURALEZA EXPERIMENTAL, DATOS Y RESPONSABILIDAD:
 
