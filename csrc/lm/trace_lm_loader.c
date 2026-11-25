@@ -61,10 +61,10 @@ static int scan_json_int_array(const char* start, const char* end, const char* k
     int count = 0;
     while (p < end && *p != ']' && count < max_items) {
         while (p < end && (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
-        if (*p == ']') break;
+        if (p >= end || *p == ']') break;
         out_arr[count++] = atoi(p);
         while (p < end && *p != ',' && *p != ']') p++;
-        if (*p == ',') p++;
+        if (p < end && *p == ',') p++;
     }
     return count;
 }

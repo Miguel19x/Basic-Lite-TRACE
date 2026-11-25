@@ -24,6 +24,11 @@ typedef struct {
 } TokenizerHeader;
 #pragma pack(pop)
 
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(TokenizerHeader) == 32, "TokenizerHeader debe medir exactamente 32 bytes");
+_Static_assert(sizeof(TraceMerge) == 8, "TraceMerge debe medir exactamente 8 bytes");
+#endif
+
 typedef enum {
     CAT_DIGIT,
     CAT_WORD,

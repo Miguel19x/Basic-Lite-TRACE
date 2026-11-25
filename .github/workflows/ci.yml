@@ -37,22 +37,9 @@ jobs:
 
       - name: Run Active Test Suites
         run: |
-          PYTHONPATH=. python tests/test_smoke.py
-          PYTHONPATH=. python tests/test_avx2_kernel.py
-          PYTHONPATH=. python tests/test_paged_bitcos.py
-          PYTHONPATH=. python tests/test_context_manager.py
-          PYTHONPATH=. python tests/test_e0_hygiene.py
-          PYTHONPATH=. python tests/test_architecture_integrity.py
-          PYTHONPATH=. python tests/test_tokenizer_parity.py
-          PYTHONPATH=. python tests/test_mla_language_model.py
-          PYTHONPATH=. python tests/test_mla_serialization.py
-          PYTHONPATH=. python tests/test_trace_lm_infer.py
-          PYTHONPATH=. python tests/test_parity_fase3.py
-          PYTHONPATH=. python tests/test_parity_temporal.py
+          OMP_NUM_THREADS=2 PYTHONPATH=. pytest tests/ -v
           if [ -f checkpoints/trace_s456_fase1_paged_bitcos.bin ]; then
-            PYTHONPATH=. python tests/test_trace_infer.py
-            PYTHONPATH=. python tests/test_parity_and_falsification.py
-            PYTHONPATH=. python tests/test_benchmark_fase2.py
+            OMP_NUM_THREADS=2 PYTHONPATH=. python scripts/benchmark_fase2.py
           fi
 
   c-sanitizers:
@@ -73,6 +60,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pytest
 
       - name: Build and Test C Engine under ASan/UBSan (AVX2 + Scalar)
         run: |
@@ -83,6 +71,7 @@ jobs:
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_avx2_kernel.py
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_tokenizer_parity.py
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_trace_lm_infer.py
+          LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_loader_hardening.py
 
       - name: Build and Test C Engine under ASan/UBSan (Scalar-only, -UTRACE_ENABLE_AVX2)
         run: |
@@ -93,3 +82,4 @@ jobs:
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_avx2_kernel.py
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_tokenizer_parity.py
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_trace_lm_infer.py
+          LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_loader_hardening.py

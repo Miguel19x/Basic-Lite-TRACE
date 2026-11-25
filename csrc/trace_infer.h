@@ -29,6 +29,13 @@ typedef struct {
     uint32_t len_p2;
 } PagedHeader;
 #pragma pack(pop)
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(PagedHeader) == 24, "PagedHeader debe medir exactamente 24 bytes (<IIHHfII)");
+_Static_assert(offsetof(PagedHeader, scale_w) == 12, "scale_w debe estar en el offset 12 de PagedHeader");
+_Static_assert(offsetof(PagedHeader, len_p1) == 16, "len_p1 debe estar en el offset 16 de PagedHeader");
+_Static_assert(offsetof(PagedHeader, len_p2) == 20, "len_p2 debe estar en el offset 20 de PagedHeader");
+_Static_assert(sizeof(float) == 4, "TRACE requiere float de 32 bits (IEEE-754)");
+#endif
 #endif
 
 typedef struct {
