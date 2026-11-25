@@ -159,10 +159,21 @@ def run_hf_2b_training(
     model_id: str,
     out_dir: Path,
     sft_steps: int,
+    grpo_steps: int,
+    grpo_group_size: int,
+    grpo_max_new_tokens: int,
+    grad_accum: int,
     lr: float,
     max_seq_len: int,
+    use_lora: bool,
+    lora_r: int,
+    lora_alpha: int,
 ) -> dict[str, Any]:
-    """Entrenamiento SFT <think> + TIR sobre HF 2B (pensado para GPU Kaggle 2x T4)."""
+    """
+    Entrenamiento SFT <think> + TIR + GRPO corto sobre HF 2B (`microsoft/bitnet-b1.58-2B-4T-bf16`).
+    Con `--use-lora` (PEFT), usa `disable_adapter()` como política de referencia KL para evitar
+    duplicar el modelo 2B en VRAM (cabe holgado en una sola GPU T4 de 16 GB en Kaggle).
+    """
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except ImportError as exc:
@@ -176,12 +187,42 @@ def run_hf_2b_training(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    dtype = torch.bfloat16 if device == "cuda" and torch.cuda.is_bf16_supported() else torch.float32
-    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    if device == "cuda":
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    else:
+        dtype = torch.float32
 
+    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype).to(device)
+    model.config.use_cache = False
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable()
+
+    if use_lora:
+        try:
+            from peft import LoraConfig, get_peft_model
+        except ImportError as exc:
+            raise RuntimeError("`--use-lora` requiere instalar `peft` (pip install peft).") from exc
+        lora_cfg = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        )
+        model = get_peft_model(model, lora_cfg)
+
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=0.01)
+    use_scaler = device == "cuda" and dtype == torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
+
+    # 1. Fase SFT enmascarada sobre completados <think> + TIR
     losses: list[float] = []
     model.train()
+    optimizer.zero_grad()
+    eff_accum = max(1, grad_accum)
+
     for step in range(sft_steps):
         ex = examples[step % len(examples)]
         p_ids = tokenizer.encode(ex.prompt + "\n", add_special_tokens=True)
@@ -190,13 +231,86 @@ def run_hf_2b_training(
         x = torch.tensor([ids], dtype=torch.long, device=device)
         pl = torch.tensor([min(len(p_ids), len(ids) - 1)], dtype=torch.long, device=device)
 
-        optimizer.zero_grad()
-        out = model(input_ids=x)
-        loss = sft_loss_on_completion(out.logits, x, pl, pad_id=int(tokenizer.pad_token_id))
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        losses.append(float(loss.detach().item()))
+        with torch.amp.autocast("cuda", dtype=dtype, enabled=(device == "cuda")):
+            out = model(input_ids=x)
+            raw_loss = sft_loss_on_completion(out.logits, x, pl, pad_id=int(tokenizer.pad_token_id))
+            loss = raw_loss / eff_accum
+
+        scaler.scale(loss).backward()
+        losses.append(float(raw_loss.detach().item()))
+
+        if (step + 1) % eff_accum == 0 or (step + 1) == sft_steps:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+
+    # 2. Fase GRPO / RLVR corta verificable (requiere LoRA para referencia KL sin duplicar VRAM)
+    grpo_metrics: list[dict[str, float]] = []
+    tir_examples = [ex for ex in examples if ex.category != "general_no_tool"]
+    if grpo_steps > 0 and use_lora and tir_examples:
+        grpo_lr = lr * 0.25
+        for pg in optimizer.param_groups:
+            pg["lr"] = grpo_lr
+
+        for step in range(grpo_steps):
+            ex = tir_examples[step % len(tir_examples)]
+            p_ids = tokenizer.encode(ex.prompt + "\n", add_special_tokens=True)
+            prompt_tensor = torch.tensor([p_ids], dtype=torch.long, device=device)
+            p_len = len(p_ids)
+
+            model.eval()
+            model.config.use_cache = True
+            with torch.no_grad():
+                gen_out = model.generate(
+                    input_ids=prompt_tensor.expand(grpo_group_size, -1),
+                    max_new_tokens=grpo_max_new_tokens,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9,
+                    pad_token_id=int(tokenizer.pad_token_id),
+                    eos_token_id=int(tokenizer.eos_token_id),
+                )
+            model.config.use_cache = False
+
+            completions = [
+                tokenizer.decode(gen_out[g, p_len:], skip_special_tokens=True)
+                for g in range(grpo_group_size)
+            ]
+            rewards, adv_list = score_group_completions(completions, ex.answer)
+            if all(a == 0.0 for a in adv_list):
+                grpo_metrics.append({"loss": 0.0, "kl_mean": 0.0, "ratio_mean": 1.0, "mean_reward": sum(rewards) / len(rewards)})
+                continue
+
+            comp_mask = (gen_out[:, 1:] != int(tokenizer.pad_token_id)).float()
+            comp_mask[:, : max(0, p_len - 1)] = 0.0
+            adv = torch.tensor(adv_list, dtype=torch.float32, device=device)
+
+            with torch.no_grad():
+                with model.disable_adapter():
+                    ref_logits = model(input_ids=gen_out).logits
+                    log_ref = gather_token_logprobs(ref_logits, gen_out)
+                old_logits = model(input_ids=gen_out).logits
+                log_old = gather_token_logprobs(old_logits, gen_out)
+
+            model.train()
+            optimizer.zero_grad()
+            with torch.amp.autocast("cuda", dtype=dtype, enabled=(device == "cuda")):
+                new_logits = model(input_ids=gen_out).logits
+                log_new = gather_token_logprobs(new_logits, gen_out)
+                loss, m = grpo_policy_loss(log_new, log_old, log_ref, adv, comp_mask, kl_beta=0.04)
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            m["mean_reward"] = sum(rewards) / len(rewards)
+            grpo_metrics.append(m)
+
+    if use_lora:
+        model = model.merge_and_unload()
 
     out_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(out_dir))
@@ -205,9 +319,12 @@ def run_hf_2b_training(
         "backend": "hf-2b",
         "model_id": model_id,
         "device": device,
+        "use_lora": use_lora,
         "sft_steps": sft_steps,
         "sft_loss_start": losses[0] if losses else 0.0,
         "sft_loss_end": losses[-1] if losses else 0.0,
+        "grpo_steps": len(grpo_metrics),
+        "grpo_last_metrics": grpo_metrics[-1] if grpo_metrics else {},
         "saved_dir": str(out_dir),
     }
 
@@ -222,11 +339,17 @@ def main() -> None:
     parser.add_argument("--general-ratio", type=float, default=0.15)
     parser.add_argument("--sft-steps", type=int, default=20)
     parser.add_argument("--grpo-steps", type=int, default=4)
+    parser.add_argument("--grpo-group-size", type=int, default=4)
+    parser.add_argument("--grpo-max-new-tokens", type=int, default=96)
+    parser.add_argument("--grad-accum", type=int, default=8)
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--model-id", default="microsoft/bitnet-b1.58-2B-4T")
+    parser.add_argument("--model-id", default="microsoft/bitnet-b1.58-2B-4T-bf16")
     parser.add_argument("--out-dir", default="/tmp/trace_phase5_out")
     parser.add_argument("--max-seq-len", type=int, default=512)
+    parser.add_argument("--use-lora", action="store_true", help="Activa LoRA (PEFT) + merge al guardar")
+    parser.add_argument("--lora-r", type=int, default=16)
+    parser.add_argument("--lora-alpha", type=int, default=32)
     args = parser.parse_args()
 
     t0 = time.perf_counter()
@@ -260,8 +383,15 @@ def main() -> None:
             model_id=args.model_id,
             out_dir=Path(args.out_dir),
             sft_steps=args.sft_steps,
+            grpo_steps=args.grpo_steps,
+            grpo_group_size=args.grpo_group_size,
+            grpo_max_new_tokens=args.grpo_max_new_tokens,
+            grad_accum=args.grad_accum,
             lr=args.lr,
             max_seq_len=args.max_seq_len,
+            use_lora=args.use_lora,
+            lora_r=args.lora_r,
+            lora_alpha=args.lora_alpha,
         )
 
     summary["elapsed_sec"] = round(time.perf_counter() - t0, 3)
