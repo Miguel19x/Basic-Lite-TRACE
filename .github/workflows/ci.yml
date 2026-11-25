@@ -81,7 +81,7 @@ jobs:
           ASAN_LIB="$(gcc -print-file-name=libasan.so)"
           SAN_CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -ffp-contract=off -fopenmp -Wall -Wextra -Werror -Wvla -I. -Icsrc"
           make clean
-          make all CFLAGS="${SAN_CFLAGS}" DISPATCH_DEFS="-UTRACE_ENABLE_AVX2" DISPATCH_OBJS="csrc/paged_dispatch.o csrc/paged_gemm_scalar.o"
+          make all CFLAGS="${SAN_CFLAGS}" DISPATCH_DEFS="-UTRACE_ENABLE_AVX2 -UTRACE_ENABLE_AVX512" DISPATCH_OBJS="csrc/paged_dispatch.o csrc/paged_gemm_scalar.o"
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_avx2_kernel.py
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_tokenizer_parity.py
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_trace_lm_infer.py

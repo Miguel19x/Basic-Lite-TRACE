@@ -313,6 +313,13 @@ float trace_dot_f32_f16_scalar(const float* x, const uint16_t* w_f16, int n) {
     return acc;
 }
 
+void trace_matvec_f32_f16_scalar(const float* x, const uint16_t* w_f16, float* out, int rows, int cols) {
+    #pragma omp parallel for schedule(static) if (rows >= 256)
+    for (int v = 0; v < rows; ++v) {
+        out[v] = trace_dot_f32_f16_scalar(x, w_f16 + (size_t)v * (size_t)cols, cols);
+    }
+}
+
 float trace_dot_f32_i8_scalar(const float* x, const int8_t* w_i8, float scale, int n) {
     float acc = 0.0f;
     for (int i = 0; i < n; ++i) {
@@ -369,6 +376,63 @@ void trace_gqa_attn_group_f32_scalar(
             if (p == 0.0f) continue;
             const float* v_s = v_layer + (size_t)s * kv_stride + kv_off;
             trace_axpy_f32_scalar(o_h, p, v_s, head_dim);
+        }
+    }
+}
+
+void trace_quantize_rows_int8_scalar(
+    const float* in,
+    const float* sub_ln_w,
+    float* x_norm,
+    int8_t* q_x,
+    float* scale_x,
+    int M,
+    int in_f,
+    float eps
+) {
+    #pragma omp parallel for schedule(static) if (M >= 16)
+    for (int m = 0; m < M; ++m) {
+        const float* in_row = in + (size_t)m * (size_t)in_f;
+        const float* row = in_row;
+        if (sub_ln_w != NULL) {
+            float* norm_row = x_norm + (size_t)m * (size_t)in_f;
+            rms_norm(in_row, sub_ln_w, norm_row, in_f, eps);
+            row = norm_row;
+        }
+        float amax = eps;
+        for (int i = 0; i < in_f; ++i) {
+            float v = fabsf(row[i]);
+            if (v > amax) amax = v;
+        }
+        float scale = amax / 127.0f;
+        float scale_inv = 127.0f / amax;
+        scale_x[m] = scale;
+        int8_t* qrow = q_x + (size_t)m * (size_t)in_f;
+        for (int i = 0; i < in_f; ++i) {
+            float q = nearbyintf(row[i] * scale_inv);
+            if (!isfinite(q)) q = 0.0f;
+            else if (q > 127.0f) q = 127.0f;
+            else if (q < -127.0f) q = -127.0f;
+            qrow[i] = (int8_t)q;
+        }
+    }
+}
+
+void trace_dequantize_rows_i32_scalar(
+    const int32_t* acc,
+    const float* scale_x,
+    float w_scale,
+    float* out,
+    int M,
+    int out_f
+) {
+    #pragma omp parallel for schedule(static) if (M >= 16)
+    for (int m = 0; m < M; ++m) {
+        float factor = scale_x[m] * w_scale;
+        const int32_t* acc_row = acc + (size_t)m * (size_t)out_f;
+        float* out_row = out + (size_t)m * (size_t)out_f;
+        for (int i = 0; i < out_f; ++i) {
+            out_row[i] = (float)acc_row[i] * factor;
         }
     }
 }

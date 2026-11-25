@@ -110,6 +110,14 @@ typedef float (*trace_dot_f32_f16_fn)(
     int n
 );
 
+typedef void (*trace_matvec_f32_f16_fn)(
+    const float* x,
+    const uint16_t* w_f16,
+    float* out,
+    int rows,
+    int cols
+);
+
 typedef float (*trace_dot_f32_i8_fn)(
     const float* x,
     const int8_t* w_i8,
@@ -130,6 +138,26 @@ typedef void (*trace_gqa_attn_group_f32_fn)(
     int total_len,
     int head_dim,
     float attn_scale
+);
+
+typedef void (*trace_quantize_rows_int8_fn)(
+    const float* in,
+    const float* sub_ln_w,
+    float* x_norm,
+    int8_t* q_x,
+    float* scale_x,
+    int M,
+    int in_f,
+    float eps
+);
+
+typedef void (*trace_dequantize_rows_i32_fn)(
+    const int32_t* acc,
+    const float* scale_x,
+    float w_scale,
+    float* out,
+    int M,
+    int out_f
 );
 
 // Funciones públicas exportadas con despacho dinámico transparente
@@ -226,6 +254,14 @@ float trace_dot_f32_f16(
     int n
 );
 
+void trace_matvec_f32_f16(
+    const float* x,
+    const uint16_t* w_f16,
+    float* out,
+    int rows,
+    int cols
+);
+
 float trace_dot_f32_i8(
     const float* x,
     const int8_t* w_i8,
@@ -246,6 +282,26 @@ void trace_gqa_attn_group_f32(
     int total_len,
     int head_dim,
     float attn_scale
+);
+
+void trace_quantize_rows_int8(
+    const float* in,
+    const float* sub_ln_w,
+    float* x_norm,
+    int8_t* q_x,
+    float* scale_x,
+    int M,
+    int in_f,
+    float eps
+);
+
+void trace_dequantize_rows_i32(
+    const int32_t* acc,
+    const float* scale_x,
+    float w_scale,
+    float* out,
+    int M,
+    int out_f
 );
 
 // Consulta y configuración de ISA activa

@@ -840,6 +840,39 @@ float trace_dot_f32_f16_avx2(const float* x, const uint16_t* w_f16, int n) {
     return dot;
 }
 
+void trace_matvec_f32_f16_avx2(const float* x, const uint16_t* w_f16, float* out, int rows, int cols) {
+    int blocks = rows / 4;
+    #pragma omp parallel for schedule(static) if (rows >= 256)
+    for (int b = 0; b < blocks; ++b) {
+        int v = b * 4;
+        const uint16_t* w0 = w_f16 + (size_t)(v + 0) * (size_t)cols;
+        const uint16_t* w1 = w_f16 + (size_t)(v + 1) * (size_t)cols;
+        const uint16_t* w2 = w_f16 + (size_t)(v + 2) * (size_t)cols;
+        const uint16_t* w3 = w_f16 + (size_t)(v + 3) * (size_t)cols;
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps(), a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+        int i = 0;
+        for (; i + 8 <= cols; i += 8) {
+            __m256 vx = _mm256_loadu_ps(x + i);
+            a0 = _mm256_fmadd_ps(vx, _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(w0 + i))), a0);
+            a1 = _mm256_fmadd_ps(vx, _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(w1 + i))), a1);
+            a2 = _mm256_fmadd_ps(vx, _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(w2 + i))), a2);
+            a3 = _mm256_fmadd_ps(vx, _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(w3 + i))), a3);
+        }
+        float d0 = hsum_ps_avx2(a0), d1 = hsum_ps_avx2(a1), d2 = hsum_ps_avx2(a2), d3 = hsum_ps_avx2(a3);
+        for (; i < cols; ++i) {
+            float xv = x[i];
+            d0 += xv * trace_f16_to_f32(w0[i]);
+            d1 += xv * trace_f16_to_f32(w1[i]);
+            d2 += xv * trace_f16_to_f32(w2[i]);
+            d3 += xv * trace_f16_to_f32(w3[i]);
+        }
+        out[v + 0] = d0; out[v + 1] = d1; out[v + 2] = d2; out[v + 3] = d3;
+    }
+    for (int v = blocks * 4; v < rows; ++v) {
+        out[v] = trace_dot_f32_f16_avx2(x, w_f16 + (size_t)v * (size_t)cols, cols);
+    }
+}
+
 float trace_dot_f32_i8_avx2(const float* x, const int8_t* w_i8, float scale, int n) {
     __m256 acc0 = _mm256_setzero_ps();
     __m256 acc1 = _mm256_setzero_ps();
@@ -1028,6 +1061,97 @@ void trace_gqa_attn_group_f32_avx2(
             if (p == 0.0f) continue;
             const float* v_s = v_layer + (size_t)s * kv_stride + kv_off;
             trace_axpy_f32_avx2(o_h, p, v_s, head_dim);
+        }
+    }
+}
+
+void trace_quantize_rows_int8_avx2(
+    const float* in,
+    const float* sub_ln_w,
+    float* x_norm,
+    int8_t* q_x,
+    float* scale_x,
+    int M,
+    int in_f,
+    float eps
+) {
+    const __m256 sign_mask = _mm256_set1_ps(-0.0f);
+    const __m256 v_max = _mm256_set1_ps(127.0f);
+    const __m256 v_min = _mm256_set1_ps(-127.0f);
+
+    #pragma omp parallel for schedule(static) if (M >= 16)
+    for (int m = 0; m < M; ++m) {
+        const float* in_row = in + (size_t)m * (size_t)in_f;
+        const float* row = in_row;
+        if (sub_ln_w != NULL) {
+            float* norm_row = x_norm + (size_t)m * (size_t)in_f;
+            rms_norm(in_row, sub_ln_w, norm_row, in_f, eps);
+            row = norm_row;
+        }
+
+        __m256 vmax = _mm256_set1_ps(eps);
+        int i = 0;
+        for (; i + 8 <= in_f; i += 8) {
+            __m256 v = _mm256_andnot_ps(sign_mask, _mm256_loadu_ps(row + i));
+            vmax = _mm256_max_ps(vmax, v);
+        }
+        __m128 m128 = _mm_max_ps(_mm256_castps256_ps128(vmax), _mm256_extractf128_ps(vmax, 1));
+        m128 = _mm_max_ps(m128, _mm_movehl_ps(m128, m128));
+        m128 = _mm_max_ss(m128, _mm_shuffle_ps(m128, m128, 1));
+        float amax = _mm_cvtss_f32(m128);
+        for (; i < in_f; ++i) {
+            float v = fabsf(row[i]);
+            if (v > amax) amax = v;
+        }
+
+        float scale = amax / 127.0f;
+        float scale_inv = 127.0f / amax;
+        scale_x[m] = scale;
+        __m256 v_sinv = _mm256_set1_ps(scale_inv);
+        int8_t* qrow = q_x + (size_t)m * (size_t)in_f;
+
+        i = 0;
+        for (; i + 8 <= in_f; i += 8) {
+            __m256 v = _mm256_mul_ps(_mm256_loadu_ps(row + i), v_sinv);
+            v = _mm256_min_ps(_mm256_max_ps(v, v_min), v_max);
+            __m256i vi = _mm256_cvtps_epi32(v);
+            __m128i lo = _mm256_castsi256_si128(vi);
+            __m128i hi = _mm256_extracti128_si256(vi, 1);
+            __m128i p16 = _mm_packs_epi32(lo, hi);
+            __m128i p8 = _mm_packs_epi16(p16, p16);
+            _mm_storel_epi64((__m128i*)(qrow + i), p8);
+        }
+        for (; i < in_f; ++i) {
+            float q = nearbyintf(row[i] * scale_inv);
+            if (!isfinite(q)) q = 0.0f;
+            else if (q > 127.0f) q = 127.0f;
+            else if (q < -127.0f) q = -127.0f;
+            qrow[i] = (int8_t)q;
+        }
+    }
+}
+
+void trace_dequantize_rows_i32_avx2(
+    const int32_t* acc,
+    const float* scale_x,
+    float w_scale,
+    float* out,
+    int M,
+    int out_f
+) {
+    #pragma omp parallel for schedule(static) if (M >= 16)
+    for (int m = 0; m < M; ++m) {
+        float factor = scale_x[m] * w_scale;
+        __m256 vf = _mm256_set1_ps(factor);
+        const int32_t* acc_row = acc + (size_t)m * (size_t)out_f;
+        float* out_row = out + (size_t)m * (size_t)out_f;
+        int i = 0;
+        for (; i + 8 <= out_f; i += 8) {
+            __m256 v = _mm256_cvtepi32_ps(_mm256_loadu_si256((const __m256i*)(acc_row + i)));
+            _mm256_storeu_ps(out_row + i, _mm256_mul_ps(v, vf));
+        }
+        for (; i < out_f; ++i) {
+            out_row[i] = (float)acc_row[i] * factor;
         }
     }
 }

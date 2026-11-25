@@ -5,10 +5,11 @@ CFLAGS ?= -O3 -ffp-contract=off -fopenmp -Wall -Wextra -Werror -Wvla -I. -Icsrc
 PIC_CFLAGS ?= $(CFLAGS) -fPIC
 EXE_CFLAGS ?= $(CFLAGS)
 AVX2_FLAGS = -mavx2 -mfma -mf16c -DTRACE_ENABLE_AVX2
+AVX512_FLAGS = -mavx512f -mavx512bw -mavx512vl -mavx512vnni -mf16c -mfma -DTRACE_ENABLE_AVX512
 
 ifeq ($(ARCH),x86_64)
-    DISPATCH_OBJS = csrc/paged_dispatch.o csrc/paged_gemm_scalar.o csrc/paged_gemm_avx2.o
-    DISPATCH_DEFS = -DTRACE_ENABLE_AVX2
+    DISPATCH_OBJS = csrc/paged_dispatch.o csrc/paged_gemm_scalar.o csrc/paged_gemm_avx2.o csrc/paged_gemm_avx512.o
+    DISPATCH_DEFS = -DTRACE_ENABLE_AVX2 -DTRACE_ENABLE_AVX512
 else
     DISPATCH_OBJS = csrc/paged_dispatch.o csrc/paged_gemm_scalar.o
     DISPATCH_DEFS =
@@ -45,6 +46,9 @@ csrc/paged_gemm_scalar.o: csrc/paged_gemm_scalar.c csrc/paged_dispatch.h csrc/tr
 
 csrc/paged_gemm_avx2.o: csrc/paged_gemm_avx2.c csrc/paged_dispatch.h csrc/paged_unpack.h csrc/trace_infer.h
 	$(CC) $(PIC_CFLAGS) $(AVX2_FLAGS) -c $< -o $@
+
+csrc/paged_gemm_avx512.o: csrc/paged_gemm_avx512.c csrc/paged_dispatch.h csrc/trace_infer.h csrc/trace_math.h
+	$(CC) $(PIC_CFLAGS) $(AVX512_FLAGS) -c $< -o $@
 
 csrc/trace_loader.o: csrc/trace_loader.c csrc/trace_infer.h
 	$(CC) $(PIC_CFLAGS) -c $< -o $@

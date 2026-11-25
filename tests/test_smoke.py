@@ -36,7 +36,7 @@ def test_kernel_c_library_exposes_required_symbols():
 def test_kernel_c_reports_valid_active_isa():
     lib = load_paged_gemm_lib()
     active_isa = lib.trace_cpu_active_isa().decode("utf-8")
-    assert active_isa in ("scalar", "avx2"), f"ISA inesperada: '{active_isa}'"
+    assert active_isa in ("scalar", "avx2", "avx512"), f"ISA inesperada: '{active_isa}'"
 
 
 def test_trace_causal_model_forward_produces_valid_fixed_width_output():

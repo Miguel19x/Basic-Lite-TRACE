@@ -134,7 +134,7 @@ void trace_lm_workspace_free(TraceLMWorkspace* ws) {
     free(ws);
 }
 
-// Proyeccion BitLinear estandar con sub_ln opcional + cuantizacion INT8 + kernel AVX2 Add-Sub
+// Proyeccion BitLinear estandar con sub_ln opcional + cuantizacion INT8 SIMD + kernel Add-Sub/VNNI
 static void paged_linear_forward_act_int8(
     const float* in,
     const TraceLMPagedLinear* lin,
@@ -146,51 +146,14 @@ static void paged_linear_forward_act_int8(
     int in_f = lin->in_features;
     int out_f = lin->out_features;
 
-    // 1-2. RMSNorm sub_ln (si existe) + Cuantizacion simetrica a INT8 fusionados por fila
-    #pragma omp parallel for schedule(static) if (M >= 16)
-    for (int m = 0; m < M; ++m) {
-        const float* in_row = in + (size_t)m * (size_t)in_f;
-        const float* row;
-        if (lin->sub_ln_w != NULL) {
-            float* norm_row = ws->x_norm + (size_t)m * (size_t)in_f;
-            rms_norm(in_row, lin->sub_ln_w, norm_row, in_f, eps);
-            row = norm_row;
-        } else {
-            row = in_row;
-        }
+    // 1-2. RMSNorm sub_ln (si existe) + Cuantizacion simetrica a INT8 vectorizada
+    trace_quantize_rows_int8(in, lin->sub_ln_w, ws->x_norm, ws->q_x, ws->scale_x, M, in_f, eps);
 
-        float amax = eps;
-        for (int i = 0; i < in_f; ++i) {
-            float v = fabsf(row[i]);
-            if (v > amax) amax = v;
-        }
-        float scale = amax / 127.0f;
-        float scale_inv = 127.0f / amax;
-        ws->scale_x[m] = scale;
-
-        int8_t* qrow = ws->q_x + (size_t)m * (size_t)in_f;
-        for (int i = 0; i < in_f; ++i) {
-            float q = nearbyintf(row[i] * scale_inv);
-            if (!isfinite(q)) q = 0.0f;
-            else if (q > 127.0f) q = 127.0f;
-            else if (q < -127.0f) q = -127.0f;
-            qrow[i] = (int8_t)q;
-        }
-    }
-
-    // 3. Matmul AVX2 aditivo
+    // 3. Matmul aditivo / VNNI despachado
     paged_direct_matmul_fast_c_multi(ws->q_x, lin->page_ptrs, lin->num_pages, ws->acc_int32, M, in_f, out_f);
 
-    // 4. Descuantizacion
-    #pragma omp parallel for schedule(static) if (M >= 16)
-    for (int m = 0; m < M; ++m) {
-        float factor = ws->scale_x[m] * lin->scale;
-        const int32_t* acc_row = ws->acc_int32 + (size_t)m * (size_t)out_f;
-        float* out_row = out + (size_t)m * (size_t)out_f;
-        for (int i = 0; i < out_f; ++i) {
-            out_row[i] = (float)acc_row[i] * factor;
-        }
-    }
+    // 4. Descuantizacion vectorizada
+    trace_dequantize_rows_i32(ws->acc_int32, ws->scale_x, lin->scale, out, M, out_f);
 }
 
 // Aplicacion de RoPE intercalado: output[0::2] = x1*c - x2*s, output[1::2] = x2*c + x1*s
@@ -592,11 +555,7 @@ int trace_lm_forward(
         const float* x_t = ws->x_norm + (size_t)t * (size_t)d_model;
         float* logits_t = last_token_only ? out_logits : (out_logits + (size_t)t * (size_t)vocab_size);
         if (model->lm_head_dtype == TRACE_EMB_FP16) {
-            #pragma omp parallel for schedule(static) if (vocab_size >= 256)
-            for (int v = 0; v < vocab_size; ++v) {
-                const uint16_t* emb_v = model->lm_head_f16 + (size_t)v * (size_t)d_model;
-                logits_t[v] = trace_dot_f32_f16(x_t, emb_v, d_model);
-            }
+            trace_matvec_f32_f16(x_t, model->lm_head_f16, logits_t, vocab_size, d_model);
         } else if (model->lm_head_dtype == TRACE_EMB_INT8) {
             #pragma omp parallel for schedule(static) if (vocab_size >= 256)
             for (int v = 0; v < vocab_size; ++v) {
