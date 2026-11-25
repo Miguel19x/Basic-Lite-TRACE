@@ -26,6 +26,8 @@ int main(int argc, char** argv) {
     const char* model_path = "checkpoints/trace_lm_trained_paged_bitcos.bin";
     const char* tokenizer_path = "checkpoints/trace_tokenizer_8k_bi.bin";
     const char* prompt = "Basic-Lite";
+    const char* system_prompt = NULL;
+    int use_chat = 0;
     int max_tokens = 32;
     float temperature = 0.0f;
     int top_k = 50;
@@ -39,6 +41,8 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) model_path = argv[++i];
         else if (strcmp(argv[i], "--tokenizer") == 0 && i + 1 < argc) tokenizer_path = argv[++i];
         else if (strcmp(argv[i], "--prompt") == 0 && i + 1 < argc) prompt = argv[++i];
+        else if (strcmp(argv[i], "--system") == 0 && i + 1 < argc) system_prompt = argv[++i];
+        else if (strcmp(argv[i], "--chat") == 0) use_chat = 1;
         else if (strcmp(argv[i], "--max_tokens") == 0 && i + 1 < argc) max_tokens = atoi(argv[++i]);
         else if (strcmp(argv[i], "--temp") == 0 && i + 1 < argc) temperature = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--top_k") == 0 && i + 1 < argc) top_k = atoi(argv[++i]);
@@ -101,8 +105,13 @@ int main(int argc, char** argv) {
 
     int prompt_len = 0;
     if (tok) {
-        prompt_len = trace_tokenizer_encode(tok, (const uint8_t*)prompt, (int)strlen(prompt), all_tokens, max_seq);
-        printf("Prompt tokenizado (%d tokens):\n", prompt_len);
+        if (use_chat) {
+            prompt_len = trace_tokenizer_format_chat_llama3(tok, system_prompt, prompt, 1, all_tokens, max_seq);
+            printf("Chat LLaMA-3 tokenizado (%d tokens):\n", prompt_len);
+        } else {
+            prompt_len = trace_tokenizer_encode(tok, (const uint8_t*)prompt, (int)strlen(prompt), all_tokens, max_seq);
+            printf("Prompt tokenizado (%d tokens):\n", prompt_len);
+        }
     } else {
         if (max_seq < 3) {
             fprintf(stderr, "Error: max_seq_len (%d) insuficiente para tokens sinteticos.\n", max_seq);
@@ -205,7 +214,7 @@ int main(int argc, char** argv) {
         }
         gen_count++;
 
-        if (next_tok == model->cfg.eos_token_id) {
+        if (next_tok == model->cfg.eos_token_id || (tok && tok->eot_id >= 0 && next_tok == tok->eot_id)) {
             break;
         }
 

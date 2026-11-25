@@ -31,7 +31,14 @@ typedef struct {
 typedef struct {
     uint32_t left;
     uint32_t right;
+    uint32_t result;
+} TraceMergeV2;
+
+typedef struct {
+    uint32_t left;
+    uint32_t right;
     int32_t rank; // -1 indica slot vacío
+    uint32_t result;
 } TraceMergeHashEntry;
 
 typedef struct {
@@ -50,6 +57,12 @@ typedef struct {
     int mask_id;
     int bos_id;
     int eos_id;
+    // Extensiones TRTK v2 (BPE 128K LLaMA-3 + chat template)
+    int version;
+    uint32_t byte_to_id[256];
+    int start_header_id;
+    int end_header_id;
+    int eot_id;
 } TraceTokenizer;
 
 size_t trace_tokenizer_sizeof(void);
@@ -70,6 +83,16 @@ int trace_tokenizer_decode(
     int num_tokens,
     uint8_t* out_text,
     int max_text_len
+);
+
+// Formateo de chat LLaMA-3 / BitNet-2B-4T (<|begin_of_text|><|start_header_id|>...<|eot_id|>)
+int trace_tokenizer_format_chat_llama3(
+    const TraceTokenizer* tok,
+    const char* system_prompt,
+    const char* user_prompt,
+    int add_generation_prompt,
+    int32_t* out_tokens,
+    int max_tokens
 );
 
 // Funciones de conveniencia de asignación dinámica

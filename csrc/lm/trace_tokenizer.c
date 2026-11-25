@@ -27,6 +27,7 @@ typedef struct {
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(TokenizerHeader) == 32, "TokenizerHeader debe medir exactamente 32 bytes");
 _Static_assert(sizeof(TraceMerge) == 8, "TraceMerge debe medir exactamente 8 bytes");
+_Static_assert(sizeof(TraceMergeV2) == 12, "TraceMergeV2 debe medir exactamente 12 bytes");
 #endif
 
 typedef enum {
@@ -136,10 +137,19 @@ int trace_tokenizer_load(TraceTokenizer* tok, const char* bin_path) {
     }
 
     int is_compact = 0;
+    int version = 1;
     uint32_t vocab_u32 = 0;
     uint32_t merges_u32 = 0;
-    if (w1 == 1) {
-        // Formato estándar de 32 bytes (versión 1)
+    tok->start_header_id = -1;
+    tok->end_header_id = -1;
+    tok->eot_id = -1;
+    for (int b = 0; b < 256; ++b) {
+        tok->byte_to_id[b] = (uint32_t)b;
+    }
+
+    if (w1 == 1 || w1 == 2) {
+        // Formato estándar de 32 bytes (versión 1 o versión 2)
+        version = (int)w1;
         uint32_t rest[5];
         if (fread(rest, sizeof(uint32_t), 5, f) != 5) {
             fclose(f);
@@ -154,6 +164,7 @@ int trace_tokenizer_load(TraceTokenizer* tok, const char* bin_path) {
     } else if (w1 >= TRACE_FIRST_MERGE) {
         // Formato compacto (w1 = vocab_size, w2 = num_merges)
         is_compact = 1;
+        version = 1;
         vocab_u32 = w1;
         merges_u32 = w2;
         tok->pad_id = TRACE_SPECIAL_PAD;
@@ -165,52 +176,106 @@ int trace_tokenizer_load(TraceTokenizer* tok, const char* bin_path) {
         return -4;
     }
 
-    if (vocab_u32 < (uint32_t)TRACE_FIRST_MERGE ||
-        vocab_u32 > (1u << 20) ||
-        merges_u32 > vocab_u32 - (uint32_t)TRACE_FIRST_MERGE) {
-        fclose(f);
-        return -4;
+    tok->version = version;
+    if (version == 1) {
+        if (vocab_u32 < (uint32_t)TRACE_FIRST_MERGE ||
+            vocab_u32 > (1u << 20) ||
+            merges_u32 > vocab_u32 - (uint32_t)TRACE_FIRST_MERGE) {
+            fclose(f);
+            return -4;
+        }
+    } else {
+        // TRTK v2 (LLaMA-3 128K BPE): soporta num_merges > vocab_size (ej. 280K merges para 128K vocab)
+        if (vocab_u32 < 256u || vocab_u32 > (1u << 20) || merges_u32 > (1u << 21)) {
+            fclose(f);
+            return -4;
+        }
     }
 
     tok->vocab_size = (int)vocab_u32;
     tok->num_merges = (int)merges_u32;
 
-    if (tok->num_merges > 0) {
-        tok->merges = (TraceMerge*)malloc(sizeof(TraceMerge) * (size_t)tok->num_merges);
-        if (!tok->merges) {
+    if (version == 2) {
+        if (fread(tok->byte_to_id, sizeof(uint32_t), 256, f) != 256) {
             fclose(f);
-            return -5;
+            return -4;
         }
+        for (int b = 0; b < 256; ++b) {
+            if (tok->byte_to_id[b] >= vocab_u32) {
+                fclose(f);
+                return -4;
+            }
+        }
+        uint32_t sp[4];
+        if (fread(sp, sizeof(uint32_t), 4, f) != 4) {
+            fclose(f);
+            return -4;
+        }
+        tok->start_header_id = (sp[0] < vocab_u32) ? (int)sp[0] : -1;
+        tok->end_header_id = (sp[1] < vocab_u32) ? (int)sp[1] : -1;
+        tok->eot_id = (sp[2] < vocab_u32) ? (int)sp[2] : -1;
+    }
 
-        if (is_compact) {
-            for (int i = 0; i < tok->num_merges; i++) {
-                uint16_t pair[2];
-                if (fread(pair, sizeof(uint16_t), 2, f) != 2) {
+    TraceMergeV2* merges_v2 = NULL;
+    if (tok->num_merges > 0) {
+        if (version == 2) {
+            merges_v2 = (TraceMergeV2*)malloc(sizeof(TraceMergeV2) * (size_t)tok->num_merges);
+            if (!merges_v2) {
+                fclose(f);
+                return -5;
+            }
+            if (fread(merges_v2, sizeof(TraceMergeV2), (size_t)tok->num_merges, f) != (size_t)tok->num_merges) {
+                free(merges_v2);
+                fclose(f);
+                return -5;
+            }
+            for (int i = 0; i < tok->num_merges; ++i) {
+                if (merges_v2[i].left >= vocab_u32 ||
+                    merges_v2[i].right >= vocab_u32 ||
+                    merges_v2[i].result >= vocab_u32) {
+                    free(merges_v2);
+                    fclose(f);
+                    return -5;
+                }
+            }
+        } else {
+            tok->merges = (TraceMerge*)malloc(sizeof(TraceMerge) * (size_t)tok->num_merges);
+            if (!tok->merges) {
+                fclose(f);
+                return -5;
+            }
+
+            if (is_compact) {
+                for (int i = 0; i < tok->num_merges; i++) {
+                    uint16_t pair[2];
+                    if (fread(pair, sizeof(uint16_t), 2, f) != 2) {
+                        trace_tokenizer_free(tok);
+                        fclose(f);
+                        return -5;
+                    }
+                    tok->merges[i].left = pair[0];
+                    tok->merges[i].right = pair[1];
+                }
+            } else {
+                if (fread(tok->merges, sizeof(TraceMerge), (size_t)tok->num_merges, f) != (size_t)tok->num_merges) {
                     trace_tokenizer_free(tok);
                     fclose(f);
                     return -5;
                 }
-                tok->merges[i].left = pair[0];
-                tok->merges[i].right = pair[1];
-            }
-        } else {
-            if (fread(tok->merges, sizeof(TraceMerge), (size_t)tok->num_merges, f) != (size_t)tok->num_merges) {
-                trace_tokenizer_free(tok);
-                fclose(f);
-                return -5;
             }
         }
     }
 
-    // Tabla hash O(1) con tamaño potencia de 2 >= num_merges * 4 (en size_t sin desbordamiento)
+    // Tabla hash O(1) con tamaño potencia de 2 >= num_merges * 2 (v2) o * 4 (v1)
     size_t h_sz = 1024;
-    size_t min_h_sz = (size_t)tok->num_merges * 4u;
+    size_t min_h_sz = (version == 2) ? ((size_t)tok->num_merges * 2u) : ((size_t)tok->num_merges * 4u);
     while (h_sz < min_h_sz && h_sz < ((size_t)1u << 24)) {
         h_sz <<= 1;
     }
     tok->hash_size = (int)h_sz;
     tok->hash_table = (TraceMergeHashEntry*)malloc(sizeof(TraceMergeHashEntry) * h_sz);
     if (!tok->hash_table) {
+        free(merges_v2);
         trace_tokenizer_free(tok);
         fclose(f);
         return -5;
@@ -220,8 +285,9 @@ int trace_tokenizer_load(TraceTokenizer* tok, const char* bin_path) {
         tok->hash_table[i].rank = -1;
     }
     for (int i = 0; i < tok->num_merges; i++) {
-        uint32_t l = tok->merges[i].left;
-        uint32_t r = tok->merges[i].right;
+        uint32_t l = (version == 2) ? merges_v2[i].left : tok->merges[i].left;
+        uint32_t r = (version == 2) ? merges_v2[i].right : tok->merges[i].right;
+        uint32_t res = (version == 2) ? merges_v2[i].result : (uint32_t)(TRACE_FIRST_MERGE + i);
         uint32_t h = hash_pair(l, r, tok->hash_size);
         int already_present = 0;
         uint32_t orig_h = h;
@@ -237,8 +303,10 @@ int trace_tokenizer_load(TraceTokenizer* tok, const char* bin_path) {
             tok->hash_table[h].left = l;
             tok->hash_table[h].right = r;
             tok->hash_table[h].rank = i;
+            tok->hash_table[h].result = res;
         }
     }
+    free(merges_v2);
 
     tok->pieces = (TraceTokenPiece*)calloc((size_t)tok->vocab_size, sizeof(TraceTokenPiece));
     if (!tok->pieces) {
@@ -323,13 +391,14 @@ int trace_tokenizer_load(TraceTokenizer* tok, const char* bin_path) {
     return 0;
 }
 
-static inline int find_merge_rank(const TraceTokenizer* tok, int32_t left, int32_t right) {
+static inline int find_merge_rank(const TraceTokenizer* tok, int32_t left, int32_t right, uint32_t* out_result) {
     if (!tok || !tok->hash_table || tok->hash_size <= 0) return -1;
     uint32_t h = hash_pair((uint32_t)left, (uint32_t)right, tok->hash_size);
     uint32_t mask = (uint32_t)(tok->hash_size - 1);
     for (int probes = 0; probes < tok->hash_size; ++probes) {
         if (tok->hash_table[h].rank == -1) return -1;
         if ((int32_t)tok->hash_table[h].left == left && (int32_t)tok->hash_table[h].right == right) {
+            if (out_result) *out_result = tok->hash_table[h].result;
             return tok->hash_table[h].rank;
         }
         h = (h + 1) & mask;
@@ -347,7 +416,7 @@ static int bpe_merge_segment(
     if (seg_len <= 0) return 0;
     if (seg_len == 1) {
         if (max_tokens > 0) {
-            out_tokens[0] = seg[0];
+            out_tokens[0] = (int32_t)tok->byte_to_id[seg[0]];
             return 1;
         }
         return 0;
@@ -365,24 +434,27 @@ static int bpe_merge_segment(
 
     int n = seg_len;
     for (int i = 0; i < n; i++) {
-        tokens[i] = seg[i];
+        tokens[i] = (int32_t)tok->byte_to_id[seg[i]];
     }
 
     while (n >= 2) {
         int best_rank = tok->num_merges;
         int best_idx = -1;
+        uint32_t best_result = 0;
 
         for (int i = 0; i < n - 1; i++) {
-            int rank = find_merge_rank(tok, tokens[i], tokens[i + 1]);
+            uint32_t res_id = 0;
+            int rank = find_merge_rank(tok, tokens[i], tokens[i + 1], &res_id);
             if (rank >= 0 && rank < best_rank) {
                 best_rank = rank;
                 best_idx = i;
+                best_result = res_id;
             }
         }
 
         if (best_idx == -1) break;
 
-        tokens[best_idx] = TRACE_FIRST_MERGE + best_rank;
+        tokens[best_idx] = (int32_t)best_result;
         for (int i = best_idx + 1; i < n - 1; i++) {
             tokens[i] = tokens[i + 1];
         }
@@ -401,6 +473,111 @@ static int bpe_merge_segment(
     return count;
 }
 
+static inline int is_ascii_letter(uint8_t c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+static inline uint8_t to_ascii_lower(uint8_t c) {
+    return (c >= 'A' && c <= 'Z') ? (uint8_t)(c + ('a' - 'A')) : c;
+}
+
+// Pre-tokenizador estilo LLaMA-3 para TRTK v2 (agrupa digitos 1..3, contracciones, espacio+palabra)
+static int trace_tokenizer_encode_v2(
+    const TraceTokenizer* tok,
+    const uint8_t* text,
+    int text_len,
+    int32_t* out_tokens,
+    int max_tokens
+) {
+    int total_tokens = 0;
+    int i = 0;
+
+    while (i < text_len && total_tokens < max_tokens) {
+        // 1. Contracciones inglesas ('s, 't, 're, 've, 'm, 'll, 'd)
+        if (text[i] == '\'' && i + 1 < text_len) {
+            uint8_t c1 = to_ascii_lower(text[i + 1]);
+            int clen = 0;
+            if (c1 == 's' || c1 == 't' || c1 == 'm' || c1 == 'd') {
+                clen = 2;
+            } else if (i + 2 < text_len) {
+                uint8_t c2 = to_ascii_lower(text[i + 2]);
+                if ((c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') || (c1 == 'l' && c2 == 'l')) {
+                    clen = 3;
+                }
+            }
+            if (clen > 0) {
+                total_tokens += bpe_merge_segment(tok, text + i, clen, out_tokens + total_tokens, max_tokens - total_tokens);
+                i += clen;
+                continue;
+            }
+        }
+
+        uint32_t cp = 0;
+        int cp_len = 0;
+        utf8_decode(text + i, text_len - i, &cp, &cp_len);
+        CodepointCat cat = classify_cp(cp);
+
+        // 2. Numeros en bloques de 1 a 3 digitos (\p{N}{1,3})
+        if (cat == CAT_DIGIT) {
+            int j = i + 1;
+            while (j < text_len && (j - i) < 3 && text[j] >= '0' && text[j] <= '9') {
+                j++;
+            }
+            total_tokens += bpe_merge_segment(tok, text + i, j - i, out_tokens + total_tokens, max_tokens - total_tokens);
+            i = j;
+            continue;
+        }
+
+        // 3. Espacio simple + letras o puntuacion
+        if (cat == CAT_SPACE && cp == ' ' && cp_len == 1 && i + 1 < text_len) {
+            uint32_t next_cp = 0;
+            int next_len = 0;
+            utf8_decode(text + i + 1, text_len - (i + 1), &next_cp, &next_len);
+            CodepointCat ncat = classify_cp(next_cp);
+            if (ncat == CAT_WORD) {
+                int j = i + 1 + next_len;
+                while (j < text_len) {
+                    uint32_t w_cp = 0;
+                    int w_len = 0;
+                    utf8_decode(text + j, text_len - j, &w_cp, &w_len);
+                    if (classify_cp(w_cp) != CAT_WORD) break;
+                    j += w_len;
+                }
+                total_tokens += bpe_merge_segment(tok, text + i, j - i, out_tokens + total_tokens, max_tokens - total_tokens);
+                i = j;
+                continue;
+            }
+            if (ncat == CAT_PUNCT && !is_ascii_letter(text[i + 1])) {
+                int j = i + 1 + next_len;
+                while (j < text_len) {
+                    uint32_t p_cp = 0;
+                    int p_len = 0;
+                    utf8_decode(text + j, text_len - j, &p_cp, &p_len);
+                    if (classify_cp(p_cp) != CAT_PUNCT) break;
+                    j += p_len;
+                }
+                total_tokens += bpe_merge_segment(tok, text + i, j - i, out_tokens + total_tokens, max_tokens - total_tokens);
+                i = j;
+                continue;
+            }
+        }
+
+        // 4. Corridas regulares por categoria
+        int j = i + cp_len;
+        while (j < text_len) {
+            uint32_t next_cp = 0;
+            int next_len = 0;
+            utf8_decode(text + j, text_len - j, &next_cp, &next_len);
+            if (classify_cp(next_cp) != cat) break;
+            j += next_len;
+        }
+        total_tokens += bpe_merge_segment(tok, text + i, j - i, out_tokens + total_tokens, max_tokens - total_tokens);
+        i = j;
+    }
+
+    return total_tokens;
+}
+
 int trace_tokenizer_encode(
     const TraceTokenizer* tok,
     const uint8_t* text,
@@ -409,6 +586,9 @@ int trace_tokenizer_encode(
     int max_tokens
 ) {
     if (!tok || !text || text_len <= 0 || !out_tokens || max_tokens <= 0) return 0;
+    if (tok->version == 2) {
+        return trace_tokenizer_encode_v2(tok, text, text_len, out_tokens, max_tokens);
+    }
 
     int total_tokens = 0;
     int i = 0;
@@ -493,7 +673,10 @@ int trace_tokenizer_decode(
     for (int i = 0; i < num_tokens; i++) {
         int32_t tid = tokens[i];
         if (tid < 0 || tid >= tok->vocab_size) continue;
-        if (tid == tok->pad_id || tid == tok->mask_id || tid == tok->bos_id || tid == tok->eos_id) continue;
+        if (tid == tok->pad_id || tid == tok->mask_id || tid == tok->bos_id || tid == tok->eos_id ||
+            (tok->start_header_id >= 0 && tid == tok->start_header_id) ||
+            (tok->end_header_id >= 0 && tid == tok->end_header_id) ||
+            (tok->eot_id >= 0 && tid == tok->eot_id)) continue;
 
         int len = (int)tok->pieces[tid].len;
         if (total_bytes + len >= max_text_len) break;
@@ -506,6 +689,63 @@ int trace_tokenizer_decode(
 
     out_text[total_bytes] = '\0';
     return total_bytes;
+}
+
+static int append_chat_turn(
+    const TraceTokenizer* tok,
+    const char* role,
+    const char* content,
+    int include_eot,
+    int32_t* out_tokens,
+    int pos,
+    int max_tokens
+) {
+    if (pos < max_tokens && tok->start_header_id >= 0) {
+        out_tokens[pos++] = tok->start_header_id;
+    }
+    if (role && role[0] != '\0' && pos < max_tokens) {
+        pos += trace_tokenizer_encode(tok, (const uint8_t*)role, (int)strlen(role), out_tokens + pos, max_tokens - pos);
+    }
+    if (pos < max_tokens && tok->end_header_id >= 0) {
+        out_tokens[pos++] = tok->end_header_id;
+    }
+    if (pos < max_tokens) {
+        const uint8_t nl2[2] = {'\n', '\n'};
+        pos += trace_tokenizer_encode(tok, nl2, 2, out_tokens + pos, max_tokens - pos);
+    }
+    if (content && content[0] != '\0' && pos < max_tokens) {
+        pos += trace_tokenizer_encode(tok, (const uint8_t*)content, (int)strlen(content), out_tokens + pos, max_tokens - pos);
+    }
+    if (include_eot && pos < max_tokens && tok->eot_id >= 0) {
+        out_tokens[pos++] = tok->eot_id;
+    }
+    return pos;
+}
+
+int trace_tokenizer_format_chat_llama3(
+    const TraceTokenizer* tok,
+    const char* system_prompt,
+    const char* user_prompt,
+    int add_generation_prompt,
+    int32_t* out_tokens,
+    int max_tokens
+) {
+    if (!tok || !out_tokens || max_tokens <= 0) return 0;
+    int pos = 0;
+
+    if (tok->bos_id >= 0 && pos < max_tokens) {
+        out_tokens[pos++] = tok->bos_id;
+    }
+    if (system_prompt && system_prompt[0] != '\0') {
+        pos = append_chat_turn(tok, "system", system_prompt, 1, out_tokens, pos, max_tokens);
+    }
+    if (user_prompt && user_prompt[0] != '\0') {
+        pos = append_chat_turn(tok, "user", user_prompt, 1, out_tokens, pos, max_tokens);
+    }
+    if (add_generation_prompt) {
+        pos = append_chat_turn(tok, "assistant", NULL, 0, out_tokens, pos, max_tokens);
+    }
+    return pos;
 }
 
 TraceTokenizer* trace_tok_load(const char* bin_path) {
