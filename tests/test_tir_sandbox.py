@@ -139,3 +139,30 @@ def test_tir_registry_blocks_escape(tmp_path: Path):
     assert bad_res["ok"] is False
     assert bad_res["blocked"] is True
     assert sb.blocked_count == 1
+
+
+def test_sandbox_blocks_python_inline_code_flag(tmp_path: Path):
+    sb = Sandbox(SandboxPolicy(root_dir=tmp_path))
+    with pytest.raises(SandboxViolationError):
+        sb.run_command(["python3", "-c", "print(1)"])
+    assert sb.blocked_count == 1
+
+
+def test_sandbox_runtime_audit_hook_blocks_outside_file_open(tmp_path: Path):
+    outside = tmp_path / "secret.txt"
+    outside.write_text("top-secret", encoding="utf-8")
+    jail = tmp_path / "jail"
+    jail.mkdir()
+    sb = Sandbox(SandboxPolicy(root_dir=jail))
+    sb.write_file("pwn.py", f"print(open({str(outside)!r}).read())\n")
+    res = sb.run_command(["python3", "pwn.py"])
+    assert res["returncode"] != 0
+    assert "PermissionError" in res["stderr"]
+    assert "top-secret" not in res["stdout"]
+
+
+def test_safe_eval_math_blocks_pow_function_dos():
+    with pytest.raises(ValueError):
+        safe_eval_math("pow(10, 10000000)")
+    with pytest.raises(ValueError):
+        safe_eval_math("(9 ** 1000) ** 1000")

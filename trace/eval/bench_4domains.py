@@ -136,7 +136,8 @@ def grade_answer(response_text: str, expected_answer: str) -> bool:
     """
     Evalúa coincidencia exacta del valor semántico esperado sin inflar por plantilla.
     Si existe etiqueta `<answer>...</answer>` (Fase 5), evalúa únicamente su contenido.
-    Exige que el valor esperado aparezca como token/número delimitado (no subcadena accidental).
+    Exige que el valor esperado aparezca como token/número delimitado (no subcadena accidental,
+    ni número negativo/decimal distinto como `-70` o `70.5` para `70`).
     """
     exp = _normalize_text(expected_answer)
     if not exp:
@@ -146,7 +147,7 @@ def grade_answer(response_text: str, expected_answer: str) -> bool:
     norm_resp = _normalize_text(candidate)
     if norm_resp == exp:
         return True
-    pattern = rf"(?<![0-9a-zA-Z_]){re.escape(exp)}(?![0-9a-zA-Z_])"
+    pattern = rf"(?<![0-9a-zA-Z_\-])(?<![0-9]\.){re.escape(exp)}(?![0-9a-zA-Z_\-]|\.[0-9])"
     return re.search(pattern, norm_resp) is not None
 
 
@@ -327,15 +328,16 @@ def _extract_json_object(raw_text: str) -> dict[str, Any] | None:
             return parsed
     except json.JSONDecodeError:
         pass
-    start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start != -1 and end > start:
+    decoder = json.JSONDecoder()
+    idx = stripped.find("{")
+    while idx != -1:
         try:
-            parsed = json.loads(stripped[start : end + 1])
-            if isinstance(parsed, dict):
-                return parsed
+            obj, _ = decoder.raw_decode(stripped, idx)
+            if isinstance(obj, dict):
+                return obj
         except json.JSONDecodeError:
-            return None
+            pass
+        idx = stripped.find("{", idx + 1)
     return None
 
 
@@ -490,7 +492,7 @@ def evaluate_4domains(
                 "overall_em": float(overall_em),
                 "by_domain": by_domain,
                 "long_docs_breakdown": long_docs_breakdown,
-                "token_ece": compute_token_ece(all_tok_confs, all_tok_corrs),
+                "token_ece": compute_token_ece(all_tok_confs, all_tok_corrs) if all_tok_confs else None,
                 "response_brier": compute_response_brier(resp_probs, resp_outcomes),
                 "total_json_tool_calls": sum(r["total_json_calls"] for r in per_task_results),
                 "valid_json_tool_calls": sum(r["valid_json_calls"] for r in per_task_results),

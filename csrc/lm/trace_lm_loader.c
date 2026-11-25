@@ -219,6 +219,13 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
         ssize_t n_read = pread(fd, (uint8_t*)model->page_pool + pool_read, chunk, (off_t)(pages_off + pool_read));
         if (n_read < 0) {
             if (errno == EINTR) continue;
+            if (model->used_odirect && errno == EINVAL) {
+                close(fd);
+                fd = open(bin_path, O_RDONLY);
+                model->fd = fd;
+                model->used_odirect = 0;
+                if (fd >= 0) continue;
+            }
             trace_lm_free(model);
             return NULL;
         }
@@ -401,9 +408,11 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
     while ((curr = scan_json_key(curr, json_end, "name")) != NULL) {
         const char* name_start = curr;
         while (name_start < json_end && *name_start != '"') name_start++;
+        if (name_start >= json_end) break;
         name_start++;
         const char* name_end = name_start;
         while (name_end < json_end && *name_end != '"') name_end++;
+        if (name_end >= json_end) break;
 
         char name[128];
         size_t nlen = name_end - name_start;
@@ -470,7 +479,8 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
                             model->tok_emb_scales = NULL;
                         }
                     }
-                } else {
+                } else if (t_len == n_elems * sizeof(float)) {
+                    free(model->tok_emb);
                     model->tok_emb = (float*)malloc(t_len);
                     if (model->tok_emb) {
                         if (pread_exact(fd_meta, model->tok_emb, t_len, (off_t)(res_off + t_off)) != 0) {
@@ -480,11 +490,14 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
                     }
                 }
             } else if (strcmp(name, "final_norm.weight") == 0) {
-                model->final_norm_w = (float*)malloc(t_len);
-                if (model->final_norm_w) {
-                    if (pread_exact(fd_meta, model->final_norm_w, t_len, (off_t)(res_off + t_off)) != 0) {
-                        free(model->final_norm_w);
-                        model->final_norm_w = NULL;
+                if (t_len == (size_t)model->cfg.d_model * sizeof(float)) {
+                    free(model->final_norm_w);
+                    model->final_norm_w = (float*)malloc(t_len);
+                    if (model->final_norm_w) {
+                        if (pread_exact(fd_meta, model->final_norm_w, t_len, (off_t)(res_off + t_off)) != 0) {
+                            free(model->final_norm_w);
+                            model->final_norm_w = NULL;
+                        }
                     }
                 }
             } else if (strcmp(name, "lm_head.weight") == 0) {
@@ -520,7 +533,8 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
                                 model->lm_head_scales = NULL;
                             }
                         }
-                    } else {
+                    } else if (t_len == n_elems * sizeof(float)) {
+                        free(model->lm_head_w);
                         model->lm_head_w = (float*)malloc(t_len);
                         if (model->lm_head_w) {
                             if (pread_exact(fd_meta, model->lm_head_w, t_len, (off_t)(res_off + t_off)) != 0) {
@@ -535,7 +549,8 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
                 const char* dot = strchr(name + 7, '.');
                 if (dot && layer_idx >= 0 && layer_idx < model->cfg.n_layers) {
                     const char* field = dot + 1;
-                    if (strcmp(field, "attn_norm.weight") == 0) {
+                    if (strcmp(field, "attn_norm.weight") == 0 && t_len == (size_t)model->cfg.d_model * sizeof(float)) {
+                        free(model->layers[layer_idx].attn_norm_w);
                         model->layers[layer_idx].attn_norm_w = (float*)malloc(t_len);
                         if (model->layers[layer_idx].attn_norm_w) {
                             if (pread_exact(fd_meta, model->layers[layer_idx].attn_norm_w, t_len, (off_t)(res_off + t_off)) != 0) {
@@ -543,7 +558,8 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
                                 model->layers[layer_idx].attn_norm_w = NULL;
                             }
                         }
-                    } else if (strcmp(field, "ffn_norm.weight") == 0) {
+                    } else if (strcmp(field, "ffn_norm.weight") == 0 && t_len == (size_t)model->cfg.d_model * sizeof(float)) {
+                        free(model->layers[layer_idx].ffn_norm_w);
                         model->layers[layer_idx].ffn_norm_w = (float*)malloc(t_len);
                         if (model->layers[layer_idx].ffn_norm_w) {
                             if (pread_exact(fd_meta, model->layers[layer_idx].ffn_norm_w, t_len, (off_t)(res_off + t_off)) != 0) {
@@ -551,7 +567,8 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
                                 model->layers[layer_idx].ffn_norm_w = NULL;
                             }
                         }
-                    } else if (strcmp(field, "attn.kv_norm.weight") == 0) {
+                    } else if (strcmp(field, "attn.kv_norm.weight") == 0 && t_len == (size_t)model->cfg.kv_lora_rank * sizeof(float)) {
+                        free(model->layers[layer_idx].kv_norm_w);
                         model->layers[layer_idx].kv_norm_w = (float*)malloc(t_len);
                         if (model->layers[layer_idx].kv_norm_w) {
                             if (pread_exact(fd_meta, model->layers[layer_idx].kv_norm_w, t_len, (off_t)(res_off + t_off)) != 0) {
@@ -561,18 +578,28 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
                         }
                     } else if (strstr(field, "sub_ln.weight") != NULL) {
                         TraceLMPagedLinear* target_lin = NULL;
+                        size_t exp_sub_elems = (size_t)model->cfg.d_model;
                         if (strcmp(field, "attn.w_dkv.sub_ln.weight") == 0) target_lin = &model->layers[layer_idx].w_dkv;
                         else if (strcmp(field, "attn.w_kr.sub_ln.weight") == 0) target_lin = &model->layers[layer_idx].w_kr;
                         else if (strcmp(field, "attn.w_q.sub_ln.weight") == 0) target_lin = &model->layers[layer_idx].w_q;
                         else if (strcmp(field, "attn.w_qr.sub_ln.weight") == 0) target_lin = &model->layers[layer_idx].w_qr;
                         else if (strcmp(field, "attn.w_k.sub_ln.weight") == 0) target_lin = &model->layers[layer_idx].w_k;
                         else if (strcmp(field, "attn.w_v.sub_ln.weight") == 0) target_lin = &model->layers[layer_idx].w_v;
-                        else if (strcmp(field, "attn.w_out.sub_ln.weight") == 0) target_lin = &model->layers[layer_idx].w_out;
+                        else if (strcmp(field, "attn.w_out.sub_ln.weight") == 0) {
+                            target_lin = &model->layers[layer_idx].w_out;
+                            exp_sub_elems = (model->cfg.attn_type == TRACE_ATTN_GQA)
+                                ? (size_t)model->cfg.n_heads * (size_t)model->cfg.head_dim
+                                : (size_t)model->cfg.n_heads * (size_t)model->cfg.v_head_dim;
+                        }
                         else if (strcmp(field, "ffn.gate.sub_ln.weight") == 0) target_lin = &model->layers[layer_idx].ffn_gate;
                         else if (strcmp(field, "ffn.up.sub_ln.weight") == 0) target_lin = &model->layers[layer_idx].ffn_up;
-                        else if (strcmp(field, "ffn.down.sub_ln.weight") == 0) target_lin = &model->layers[layer_idx].ffn_down;
+                        else if (strcmp(field, "ffn.down.sub_ln.weight") == 0) {
+                            target_lin = &model->layers[layer_idx].ffn_down;
+                            exp_sub_elems = (size_t)model->cfg.d_ff;
+                        }
 
-                        if (target_lin) {
+                        if (target_lin && t_len == exp_sub_elems * sizeof(float)) {
+                            free(target_lin->sub_ln_w);
                             target_lin->sub_ln_w = (float*)malloc(t_len);
                             if (target_lin->sub_ln_w) {
                                 if (pread_exact(fd_meta, target_lin->sub_ln_w, t_len, (off_t)(res_off + t_off)) != 0) {
@@ -723,12 +750,16 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
             return NULL;
         }
         if (model->cfg.attn_type == TRACE_ATTN_GQA) {
+            int q_dim = model->cfg.n_heads * model->cfg.head_dim;
+            int kv_dim = model->cfg.n_kv_heads * model->cfg.head_dim;
             const TraceLMPagedLinear* lins[6] = {
                 &l->w_q, &l->w_k, &l->w_v, &l->w_out, &l->ffn_up, &l->ffn_down
             };
+            const int exp_in[6] = {model->cfg.d_model, model->cfg.d_model, model->cfg.d_model, q_dim, model->cfg.d_model, model->cfg.d_ff};
+            const int exp_out[6] = {q_dim, kv_dim, kv_dim, model->cfg.d_model, model->cfg.d_ff, model->cfg.d_model};
             for (int k = 0; k < 6; ++k) {
                 if (!lins[k]->page_ptrs || lins[k]->num_pages <= 0 ||
-                    lins[k]->in_features <= 0 || lins[k]->out_features <= 0) {
+                    lins[k]->in_features != exp_in[k] || lins[k]->out_features != exp_out[k]) {
                     trace_lm_free(model);
                     return NULL;
                 }
@@ -738,13 +769,24 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
                 trace_lm_free(model);
                 return NULL;
             }
+            int q_nope_dim = model->cfg.n_heads * model->cfg.qk_nope_head_dim;
+            int q_rope_dim = model->cfg.n_heads * model->cfg.qk_rope_head_dim;
+            int v_dim = model->cfg.n_heads * model->cfg.v_head_dim;
             const TraceLMPagedLinear* lins[9] = {
                 &l->w_dkv, &l->w_uk, &l->w_uv, &l->w_kr,
                 &l->w_q, &l->w_qr, &l->w_out, &l->ffn_up, &l->ffn_down
             };
+            const int exp_in[9] = {
+                model->cfg.d_model, model->cfg.kv_lora_rank, model->cfg.kv_lora_rank, model->cfg.d_model,
+                model->cfg.d_model, model->cfg.d_model, v_dim, model->cfg.d_model, model->cfg.d_ff
+            };
+            const int exp_out[9] = {
+                model->cfg.kv_lora_rank, q_nope_dim, v_dim, model->cfg.qk_rope_head_dim,
+                q_nope_dim, q_rope_dim, model->cfg.d_model, model->cfg.d_ff, model->cfg.d_model
+            };
             for (int k = 0; k < 9; ++k) {
                 if (!lins[k]->page_ptrs || lins[k]->num_pages <= 0 ||
-                    lins[k]->in_features <= 0 || lins[k]->out_features <= 0) {
+                    lins[k]->in_features != exp_in[k] || lins[k]->out_features != exp_out[k]) {
                     trace_lm_free(model);
                     return NULL;
                 }
@@ -752,7 +794,7 @@ TraceLMModel* trace_lm_load(const char* bin_path) {
         }
         if (model->cfg.use_gated_ffn) {
             if (!l->ffn_gate.page_ptrs || l->ffn_gate.num_pages <= 0 ||
-                l->ffn_gate.in_features <= 0 || l->ffn_gate.out_features <= 0) {
+                l->ffn_gate.in_features != model->cfg.d_model || l->ffn_gate.out_features != model->cfg.d_ff) {
                 trace_lm_free(model);
                 return NULL;
             }

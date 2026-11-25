@@ -201,7 +201,7 @@ int main(int argc, char** argv) {
 
     for (int step = 0; step < max_tokens; ++step) {
         if (tok) {
-            uint8_t piece[128];
+            uint8_t piece[512];
             int32_t t_id = (int32_t)next_tok;
             int plen = trace_tokenizer_decode(tok, &t_id, 1, piece, (int)sizeof(piece) - 1);
             if (plen > 0) {

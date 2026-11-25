@@ -113,3 +113,24 @@ def test_bench4b_grade_answer_prefers_answer_tag():
     resp = "<think>El año incorrecto sería 1542, pero L3 dice 1494.</think>\n<answer>1494</answer>"
     assert grade_answer(resp, "1494") is True
     assert grade_answer(resp, "1542") is False
+
+
+def test_bench4b_grade_answer_rejects_negative_or_decimal_mismatch():
+    assert grade_answer("El resultado es -70", "70") is False
+    assert grade_answer("El resultado es 70.5", "70") is False
+
+
+def test_sft_loss_respects_explicit_tool_response_loss_mask():
+    torch.manual_seed(13)
+    logits = torch.randn(1, 8, 16, requires_grad=True)
+    input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 2]], dtype=torch.long)
+    prompt_lengths = torch.tensor([3], dtype=torch.long)
+    # Enmascarar posiciones 4..5 (simula <tool_response>) manteniendo EOS final en pos 7 activo
+    loss_mask = torch.tensor([[0, 0, 0, 1, 0, 0, 1, 1]], dtype=torch.float32)
+
+    loss = sft_loss_on_completion(logits, input_ids, prompt_lengths, pad_id=2, loss_mask=loss_mask)
+    loss.backward()
+    # Posiciones 3 y 4 predicen índices 4 y 5 (enmascarados a 0): gradiente exacto 0
+    assert torch.all(logits.grad[0, 3:5, :] == 0.0)
+    # Posición 6 predice índice 7 (EOS final = 2 == pad_id): gradiente NO nulo gracias a loss_mask
+    assert float(logits.grad[0, 6, :].abs().sum().item()) > 0.0

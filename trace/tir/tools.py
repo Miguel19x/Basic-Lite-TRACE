@@ -53,28 +53,40 @@ _SAFE_CONSTS: dict[str, float] = {
 }
 
 
+def _check_safe_value(val: float | int) -> float | int:
+    if isinstance(val, int) and val.bit_length() > 4096:
+        raise ValueError("Resultado entero excede el límite seguro (4096 bits)")
+    if isinstance(val, float) and not math.isfinite(val):
+        raise ValueError("Resultado flotante no finito en calculadora segura")
+    return val
+
+
 def _eval_node(node: ast.AST) -> float | int:
     if isinstance(node, ast.Expression):
         return _eval_node(node.body)
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
-        return node.value
+        return _check_safe_value(node.value)
     if isinstance(node, ast.Name) and node.id in _SAFE_CONSTS:
         return _SAFE_CONSTS[node.id]
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
-        return _UNARY_OPS[type(node.op)](_eval_node(node.operand))
+        return _check_safe_value(_UNARY_OPS[type(node.op)](_eval_node(node.operand)))
     if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
         left = _eval_node(node.left)
         right = _eval_node(node.right)
-        if isinstance(node.op, ast.Pow) and abs(right) > 1000:
-            raise ValueError("Exponente demasiado grande en calculadora segura")
-        return _BIN_OPS[type(node.op)](left, right)
+        if isinstance(node.op, ast.Pow):
+            if abs(right) > 1000 or (abs(left) > 1_000_000 and abs(right) > 32):
+                raise ValueError("Exponente demasiado grande en calculadora segura")
+        return _check_safe_value(_BIN_OPS[type(node.op)](left, right))
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _SAFE_FUNCS:
         if node.keywords:
             raise ValueError("No se admiten argumentos nombrados en calculadora segura")
         args = [_eval_node(a) for a in node.args]
-        if node.func.id == "factorial" and (len(args) != 1 or not isinstance(args[0], int) or args[0] > 1000):
-            raise ValueError("factorial requiere entero <= 1000")
-        return _SAFE_FUNCS[node.func.id](*args)
+        if node.func.id == "pow":
+            if len(args) not in (2, 3) or abs(args[1]) > 1000 or (abs(args[0]) > 1_000_000 and abs(args[1]) > 32):
+                raise ValueError("pow() con exponente fuera del límite seguro")
+        if node.func.id == "factorial" and (len(args) != 1 or not isinstance(args[0], int) or args[0] < 0 or args[0] > 1000):
+            raise ValueError("factorial requiere entero entre 0 y 1000")
+        return _check_safe_value(_SAFE_FUNCS[node.func.id](*args))
     raise ValueError(f"Expresión matemática no permitida: {ast.dump(node)}")
 
 

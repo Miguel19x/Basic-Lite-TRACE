@@ -90,11 +90,13 @@ void paged_direct_matmul_fast_c_avx512(
     int64_t M,
     int64_t K
 ) {
+    if (!x || !page_blob || !out || M <= 0 || K <= 0) return;
     const PagedHeader* hdr = (const PagedHeader*)page_blob;
     if (hdr->fmt_code != 1) return;
 
     const uint32_t rows = hdr->rows;
     const uint16_t cols = hdr->cols;
+    if ((int64_t)cols > K) return;
     const uint8_t* payload = page_blob + sizeof(PagedHeader);
     int64_t padded_cols = ((int64_t)cols + 31) / 32 * 32;
     int64_t row_stride_bytes = padded_cols >> 2;
@@ -1023,6 +1025,25 @@ void trace_quantize_rows_int8_avx512(
         for (; i < in_f; ++i) {
             float v = fabsf(row[i]);
             if (v > amax) amax = v;
+        }
+        if (!isfinite(amax)) {
+            amax = eps;
+            for (int k = 0; k < in_f; ++k) {
+                float v = fabsf(row[k]);
+                if (isfinite(v) && v > amax) amax = v;
+            }
+            float scale = amax / 127.0f;
+            float scale_inv = 127.0f / amax;
+            scale_x[m] = scale;
+            int8_t* qrow_fb = q_x + (size_t)m * (size_t)in_f;
+            for (int k = 0; k < in_f; ++k) {
+                float q = nearbyintf(row[k] * scale_inv);
+                if (!isfinite(q)) q = 0.0f;
+                else if (q > 127.0f) q = 127.0f;
+                else if (q < -127.0f) q = -127.0f;
+                qrow_fb[k] = (int8_t)q;
+            }
+            continue;
         }
 
         float scale = amax / 127.0f;

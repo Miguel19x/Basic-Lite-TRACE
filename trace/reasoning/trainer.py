@@ -22,15 +22,18 @@ def sft_loss_on_completion(
     input_ids: torch.Tensor,
     prompt_lengths: torch.Tensor,
     pad_id: int = 0,
+    loss_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Cross-entropy causal calculada estrictamente sobre los tokens del completado
-    (enmascarando el prompt y el padding con ignore_index=-100).
+    (enmascarando prompt, padding y opcionalmente spans como `<tool_response>`).
 
     Args:
         logits: [B, T, V]
         input_ids: [B, T]
         prompt_lengths: [B] longitud de cada prompt (>= 1)
+        loss_mask: [B, T] opcional (1 = incluir en pérdida, 0 = ignorar). Si se pasa,
+                   se respeta explícitamente sin enmascarar el EOS final aunque pad_id == eos_id.
     """
     bsz, seq_len, vocab = logits.shape
     if seq_len < 2:
@@ -39,11 +42,13 @@ def sft_loss_on_completion(
     shift_logits = logits[:, :-1, :].contiguous()
     shift_labels = input_ids[:, 1:].clone()
 
-    # Enmascarar posiciones que pertenecen al prompt (target index < prompt_len) o padding
     pos = torch.arange(1, seq_len, device=input_ids.device).unsqueeze(0).expand(bsz, -1)
     prompt_mask = pos < prompt_lengths.unsqueeze(1)
-    pad_mask = shift_labels == pad_id
-    shift_labels[prompt_mask | pad_mask] = -100
+    if loss_mask is not None:
+        ignore_mask = prompt_mask | (loss_mask[:, 1:] <= 0)
+    else:
+        ignore_mask = prompt_mask | (shift_labels == pad_id)
+    shift_labels[ignore_mask] = -100
 
     valid_tokens = int((shift_labels != -100).sum().item())
     if valid_tokens == 0:

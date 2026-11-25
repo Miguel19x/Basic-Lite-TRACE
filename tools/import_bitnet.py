@@ -272,8 +272,10 @@ def import_bitnet_model(
     eps = float(hf_cfg.get("rms_norm_eps", 1e-5))
     rope_theta = float(hf_cfg.get("rope_theta", 500000.0))
     tie_emb = bool(hf_cfg.get("tie_word_embeddings", True))
-    bos_id = int(hf_cfg.get("bos_token_id", 128000))
-    eos_id = int(hf_cfg.get("eos_token_id", 128001))
+    raw_bos = hf_cfg.get("bos_token_id", 128000)
+    raw_eos = hf_cfg.get("eos_token_id", 128001)
+    bos_id = int(raw_bos[0] if isinstance(raw_bos, list) else raw_bos)
+    eos_id = int(raw_eos[0] if isinstance(raw_eos, list) else raw_eos)
     pad_id = int(hf_cfg.get("pad_token_id") if hf_cfg.get("pad_token_id") is not None else eos_id)
     if pad_id < 0 or pad_id >= vocab_size:
         pad_id = 0

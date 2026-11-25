@@ -219,11 +219,19 @@ static int step_byte(TraceJsonGrammar* g, uint8_t c) {
             return 0;
 
         case TRACE_JSON_DONE:
-            return 0;
+            return is_json_ws(c) ? 1 : 0;
 
         default:
             return 0;
     }
+}
+
+static int check_bytes_valid(const TraceJsonGrammar* g, const uint8_t* bytes, int len) {
+    TraceJsonGrammar tmp = *g;
+    for (int i = 0; i < len; ++i) {
+        if (!step_byte(&tmp, bytes[i])) return 0;
+    }
+    return 1;
 }
 
 int trace_json_grammar_advance_bytes(TraceJsonGrammar* g, const uint8_t* bytes, int len) {
@@ -285,8 +293,7 @@ int trace_json_grammar_mask_logits(const TraceJsonGrammar* g, const TraceTokeniz
             logits[v] = -INFINITY;
             continue;
         }
-        TraceJsonGrammar tmp = *g;
-        if (trace_json_grammar_advance_bytes(&tmp, p->bytes, (int)p->len)) {
+        if (check_bytes_valid(g, p->bytes, (int)p->len)) {
             allowed++;
         } else {
             logits[v] = -INFINITY;

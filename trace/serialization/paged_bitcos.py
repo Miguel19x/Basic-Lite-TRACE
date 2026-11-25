@@ -389,15 +389,23 @@ class PagedBitCOSReader:
         return self._mm[start : start + self.page_size]
 
     def read_resident_tensor(self, name: str) -> np.ndarray | None:
-        """Recupera un tensor residente (FP32) directamente del archivo."""
+        """Recupera un tensor residente (FP32, FP16 o INT8 descuantizado) directamente del archivo."""
         info = self.tensors_map.get(name)
         if not info or not info.get("is_resident", False):
             return None
         start = self.res_offset + info["offset"]
         length = info["length"]
         raw = self._mm[start : start + length]
-        arr = np.frombuffer(raw, dtype=np.float32).reshape(info["shape"])
-        return arr.copy()
+        dtype_str = info.get("dtype", "float32")
+        shape = tuple(info["shape"])
+        if dtype_str == "float16":
+            return np.frombuffer(raw, dtype=np.float16).reshape(shape).copy()
+        if dtype_str == "int8":
+            n_elems = int(np.prod(shape))
+            q = np.frombuffer(raw[:n_elems], dtype=np.int8).reshape(shape)
+            scales = np.frombuffer(raw[n_elems:], dtype=np.float32).reshape((shape[0], 1))
+            return (q.astype(np.float32) * scales).copy()
+        return np.frombuffer(raw, dtype=np.float32).reshape(shape).copy()
 
     def get_expert_pages(self, expert_id: int) -> list[int]:
         """Retorna las páginas que componen a un experto determinado."""

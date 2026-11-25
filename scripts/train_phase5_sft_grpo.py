@@ -27,15 +27,21 @@ from typing import Any
 
 import torch
 
+from trace.eval.bench_4domains import _extract_json_object
 from trace.lm.config import TRACELMConfig
 from trace.lm.gqa import BitNetGQALM
-from trace.reasoning.dataset import ReasoningTraceExample, build_verified_tir_dataset
+from trace.reasoning.dataset import (
+    ReasoningTraceExample,
+    build_verified_tir_dataset,
+    format_llama3_chat_prompt,
+)
 from trace.reasoning.trainer import (
     gather_token_logprobs,
     grpo_policy_loss,
     score_group_completions,
     sft_loss_on_completion,
 )
+from trace.tir.tools import TIRToolRegistry
 
 
 def export_dataset_jsonl(examples: list[ReasoningTraceExample], out_path: Path) -> None:
@@ -202,6 +208,8 @@ def run_hf_2b_training(
             from peft import LoraConfig, get_peft_model
         except ImportError as exc:
             raise RuntimeError("`--use-lora` requiere instalar `peft` (pip install peft).") from exc
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
         lora_cfg = LoraConfig(
             r=lora_r,
             lora_alpha=lora_alpha,
@@ -213,11 +221,45 @@ def run_hf_2b_training(
         model = get_peft_model(model, lora_cfg)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=0.01)
+    # En FP16 + GradScaler (T4), los parámetros entrenables deben vivir en FP32 para evitar
+    # `ValueError: Attempting to unscale FP16 gradients`.
     use_scaler = device == "cuda" and dtype == torch.float16
+    if use_scaler:
+        for p in trainable_params:
+            p.data = p.data.float()
+
+    optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=0.01)
     scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
-    # 1. Fase SFT enmascarada sobre completados <think> + TIR
+    eot_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
+    stop_id = int(eot_id) if isinstance(eot_id, int) and eot_id >= 0 else int(tokenizer.eos_token_id)
+
+    def _encode_sft_with_tool_response_mask(ex: ReasoningTraceExample) -> tuple[list[int], int, list[int]]:
+        """Codifica con plantilla LLaMA-3 y enmascara `<tool_response>...</tool_response>` a 0."""
+        chat_prompt = format_llama3_chat_prompt(ex.prompt)
+        p_ids = tokenizer.encode(chat_prompt, add_special_tokens=False)
+        target = ex.formatted_target
+        resp_start = target.find("<tool_response>")
+        resp_end = target.find("</tool_response>")
+        comp_ids: list[int] = []
+        comp_mask: list[int] = []
+        if resp_start != -1 and resp_end != -1 and resp_end > resp_start:
+            end_tag = resp_end + len("</tool_response>")
+            before = tokenizer.encode(target[:resp_start], add_special_tokens=False)
+            middle = tokenizer.encode(target[resp_start:end_tag], add_special_tokens=False)
+            after = tokenizer.encode(target[end_tag:], add_special_tokens=False)
+            comp_ids = before + middle + after + [stop_id]
+            comp_mask = ([1] * len(before)) + ([0] * len(middle)) + ([1] * (len(after) + 1))
+        else:
+            body = tokenizer.encode(target, add_special_tokens=False) + [stop_id]
+            comp_ids = body
+            comp_mask = [1] * len(body)
+
+        ids = (p_ids + comp_ids)[:max_seq_len]
+        mask = ([0] * len(p_ids) + comp_mask)[:max_seq_len]
+        return ids, min(len(p_ids), len(ids) - 1), mask
+
+    # 1. Fase SFT enmascarada (sin entrenar sobre `<tool_response>` y sin enmascarar `stop_id`)
     losses: list[float] = []
     model.train()
     optimizer.zero_grad()
@@ -225,15 +267,14 @@ def run_hf_2b_training(
 
     for step in range(sft_steps):
         ex = examples[step % len(examples)]
-        p_ids = tokenizer.encode(ex.prompt + "\n", add_special_tokens=True)
-        t_ids = tokenizer.encode(ex.formatted_target, add_special_tokens=False) + [tokenizer.eos_token_id]
-        ids = (p_ids + t_ids)[:max_seq_len]
+        ids, p_len, mask_list = _encode_sft_with_tool_response_mask(ex)
         x = torch.tensor([ids], dtype=torch.long, device=device)
-        pl = torch.tensor([min(len(p_ids), len(ids) - 1)], dtype=torch.long, device=device)
+        pl = torch.tensor([p_len], dtype=torch.long, device=device)
+        lmask = torch.tensor([mask_list], dtype=torch.float32, device=device)
 
         with torch.amp.autocast("cuda", dtype=dtype, enabled=(device == "cuda")):
             out = model(input_ids=x)
-            raw_loss = sft_loss_on_completion(out.logits, x, pl, pad_id=int(tokenizer.pad_token_id))
+            raw_loss = sft_loss_on_completion(out.logits, x, pl, pad_id=int(tokenizer.pad_token_id), loss_mask=lmask)
             loss = raw_loss / eff_accum
 
         scaler.scale(loss).backward()
@@ -245,9 +286,12 @@ def run_hf_2b_training(
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
+        if (step + 1) % 100 == 0 or (step + 1) == sft_steps:
+            print(f"[SFT {step + 1}/{sft_steps}] loss={losses[-1]:.4f}", flush=True)
 
-    # 2. Fase GRPO / RLVR corta verificable (requiere LoRA para referencia KL sin duplicar VRAM)
+    # 2. Fase GRPO / RLVR corta verificable (con ejecución real de `calc` si emite `<tool_call>`)
     grpo_metrics: list[dict[str, float]] = []
+    reg_calc = TIRToolRegistry()
     tir_examples = [ex for ex in examples if ex.category != "general_no_tool"]
     if grpo_steps > 0 and use_lora and tir_examples:
         grpo_lr = lr * 0.25
@@ -256,11 +300,13 @@ def run_hf_2b_training(
 
         for step in range(grpo_steps):
             ex = tir_examples[step % len(tir_examples)]
-            p_ids = tokenizer.encode(ex.prompt + "\n", add_special_tokens=True)
+            p_ids = tokenizer.encode(format_llama3_chat_prompt(ex.prompt), add_special_tokens=False)
             prompt_tensor = torch.tensor([p_ids], dtype=torch.long, device=device)
             p_len = len(p_ids)
 
             model.eval()
+            if hasattr(model, "gradient_checkpointing_disable"):
+                model.gradient_checkpointing_disable()
             model.config.use_cache = True
             with torch.no_grad():
                 gen_out = model.generate(
@@ -270,24 +316,42 @@ def run_hf_2b_training(
                     temperature=0.7,
                     top_p=0.9,
                     pad_token_id=int(tokenizer.pad_token_id),
-                    eos_token_id=int(tokenizer.eos_token_id),
+                    eos_token_id=stop_id,
                 )
             model.config.use_cache = False
+            if hasattr(model, "gradient_checkpointing_enable"):
+                model.gradient_checkpointing_enable()
 
-            completions = [
-                tokenizer.decode(gen_out[g, p_len:], skip_special_tokens=True)
-                for g in range(grpo_group_size)
-            ]
+            completions = []
+            for g in range(grpo_group_size):
+                comp = tokenizer.decode(gen_out[g, p_len:], skip_special_tokens=True)
+                # Si la traza invocó `calc` con JSON válido, ejecutarlo realmente y adjuntar `<answer>`
+                parsed = _extract_json_object(comp)
+                if parsed and parsed.get("tool") == "calc" and isinstance(parsed.get("args"), dict):
+                    res = reg_calc.dispatch("calc", parsed["args"])
+                    if res.get("ok") and "<answer>" not in comp:
+                        comp = f"{comp}\n<answer>{res['result']}</answer>"
+                completions.append(comp)
+
             rewards, adv_list = score_group_completions(completions, ex.answer)
             if all(a == 0.0 for a in adv_list):
                 grpo_metrics.append({"loss": 0.0, "kl_mean": 0.0, "ratio_mean": 1.0, "mean_reward": sum(rewards) / len(rewards)})
                 continue
 
-            comp_mask = (gen_out[:, 1:] != int(tokenizer.pad_token_id)).float()
-            comp_mask[:, : max(0, p_len - 1)] = 0.0
+            # Construir máscara de completado preservando el primer `stop_id` (no enmascarar EOS real)
+            comp_mask = torch.zeros((grpo_group_size, gen_out.shape[1] - 1), dtype=torch.float32, device=device)
+            for g in range(grpo_group_size):
+                seq_g = gen_out[g].tolist()
+                end_pos = len(seq_g) - 1
+                for idx in range(p_len, len(seq_g)):
+                    if seq_g[idx] == stop_id:
+                        end_pos = idx
+                        break
+                comp_mask[g, max(0, p_len - 1) : end_pos] = 1.0
+
             adv = torch.tensor(adv_list, dtype=torch.float32, device=device)
 
-            with torch.no_grad():
+            with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype, enabled=(device == "cuda")):
                 with model.disable_adapter():
                     ref_logits = model(input_ids=gen_out).logits
                     log_ref = gather_token_logprobs(ref_logits, gen_out)
@@ -308,6 +372,8 @@ def run_hf_2b_training(
             scaler.update()
             m["mean_reward"] = sum(rewards) / len(rewards)
             grpo_metrics.append(m)
+            if (step + 1) % 8 == 0 or (step + 1) == grpo_steps:
+                print(f"[GRPO {step + 1}/{grpo_steps}] reward={m['mean_reward']:.3f} kl={m['kl_mean']:.4f}", flush=True)
 
     if use_lora:
         model = model.merge_and_unload()

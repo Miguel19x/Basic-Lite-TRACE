@@ -41,6 +41,21 @@ class ReasoningTraceExample:
     formatted_target: str
 
 
+DEFAULT_SYSTEM_PROMPT = "Eres un asistente tecnico conciso y preciso. Responde solo lo solicitado."
+
+
+def format_llama3_chat_prompt(user_prompt: str, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> str:
+    """Formatea un turno de chat idéntico a `trace_tokenizer_format_chat_llama3` en C."""
+    return (
+        "<|begin_of_text|>"
+        "<|start_header_id|>system<|end_header_id|>\n\n"
+        f"{system_prompt}<|eot_id|>"
+        "<|start_header_id|>user<|end_header_id|>\n\n"
+        f"{user_prompt}<|eot_id|>"
+        "<|start_header_id|>assistant<|end_header_id|>\n\n"
+    )
+
+
 def format_trace_target(
     thought_before: str,
     tool_call: dict[str, Any],
@@ -219,12 +234,20 @@ def build_verified_tir_dataset(
                 )
             )
 
-    # 3. Trazas factuales con SQLite L3 (disjuntas del corpus de test de Fase 4B)
+    # 3. Trazas factuales con SQLite L3 (12 hechos disjuntos del corpus de test de Fase 4B)
     l3_train_rows = [
         ("Monte Kilimanjaro", "geography", "El Monte Kilimanjaro en Tanzania tiene una altitud de 5895 metros."),
         ("Invención de la Imprenta", "history", "Johannes Gutenberg introdujo la imprenta de tipos móviles en 1440."),
         ("Velocidad de la Luz", "science", "La velocidad de la luz en el vacío es exactamente 299792458 m/s."),
         ("Río Nilo", "geography", "El río Nilo tiene una longitud aproximada de 6650 kilómetros en África."),
+        ("Monte Everest", "geography", "El Monte Everest alcanza una altitud oficial de 8849 metros sobre el nivel del mar."),
+        ("Fosa de las Marianas", "geography", "El abismo Challenger en la Fosa de las Marianas alcanza 10984 metros de profundidad."),
+        ("Desierto de Atacama", "geography", "El desierto de Atacama en Chile cubre una superficie aproximada de 105000 km2."),
+        ("Revolución Francesa", "history", "La toma de la Bastilla que inició la Revolución Francesa ocurrió en 1789."),
+        ("Llegada a la Luna", "history", "La misión Apolo 11 alunizó por primera vez el 20 de julio de 1969."),
+        ("Número atómico del Oro", "science", "El oro (Au) tiene el número atómico 79 en la tabla periódica."),
+        ("Punto de ebullición del nitrógeno", "science", "El nitrógeno líquido hierve a 77 Kelvin a presión atmosférica estándar."),
+        ("Fundación de la ONU", "history", "La Organización de las Naciones Unidas fue fundada oficialmente en 1945."),
     ]
     l3 = L3Encyclopedia(":memory:")
     try:
@@ -235,6 +258,14 @@ def build_verified_tir_dataset(
             ("imprenta Gutenberg", "¿En qué año introdujo Gutenberg la imprenta de tipos móviles?", "1440"),
             ("velocidad de la luz", "¿Cuál es la velocidad exacta de la luz en m/s?", "299792458"),
             ("longitud río Nilo", "¿Cuál es la longitud aproximada en kilómetros del río Nilo?", "6650"),
+            ("altitud Monte Everest", "¿Cuál es la altitud oficial en metros del Monte Everest?", "8849"),
+            ("Fosa de las Marianas", "¿Cuál es la profundidad en metros del abismo Challenger en las Marianas?", "10984"),
+            ("Desierto de Atacama", "¿Cuál es la superficie aproximada en km2 del desierto de Atacama?", "105000"),
+            ("toma de la Bastilla", "¿En qué año ocurrió la toma de la Bastilla?", "1789"),
+            ("misión Apolo 11", "¿En qué año alunizó la misión Apolo 11?", "1969"),
+            ("número atómico oro", "¿Cuál es el número atómico del oro (Au)?", "79"),
+            ("ebullición nitrógeno", "¿A cuántos Kelvin hierve el nitrógeno líquido a presión estándar?", "77"),
+            ("fundación ONU", "¿En qué año fue fundada oficialmente la Organización de las Naciones Unidas?", "1945"),
         ]
         for i in range(num_factual):
             q, q_prompt, ans = factual_specs[i % len(factual_specs)]

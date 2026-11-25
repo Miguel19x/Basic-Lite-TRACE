@@ -231,17 +231,32 @@ class NativeTraceLMBackend:
         seq = list(prompt_ids)
         gen_ids: list[int] = []
         tok_confs: list[float] = []
+        # En TRTK v2 (128K LLaMA-3), ID 2 es '#' (NO EOS); parar solo en EOS/EOT reales del vocabulario
+        stop_ids = {128001, 128009} if self.vocab_size > 100000 else {259}
+        # Modo adaptativo para C3: si el modelo inicia con '<think>', permitir razonamiento
+        # libre hasta emitir '<tool_call>' y activar entonces la máscara JSON PDA en C.
+        grammar_active = False
 
-        for _ in range(max_new_tokens):
+        for step in range(max_new_tokens):
             if json_constrained:
-                if int(self.tok.trace_json_grammar_is_done(self.gram_buf)):
-                    break
-                allowed = int(self.tok.trace_json_grammar_mask_logits(self.gram_buf, self.tok_buf, logits_ptr))
-                if allowed <= 0:
-                    break
+                if grammar_active:
+                    if int(self.tok.trace_json_grammar_is_done(self.gram_buf)):
+                        break
+                    allowed = int(self.tok.trace_json_grammar_mask_logits(self.gram_buf, self.tok_buf, logits_ptr))
+                    if allowed <= 0:
+                        break
+                elif step == 0:
+                    # Si el argmax natural no empieza por '<', activar máscara JSON estricta desde token 0
+                    raw_top = int(self.lm.trace_lm_sample_greedy(logits_ptr, self.vocab_size))
+                    raw_piece = self._decode([raw_top]) if raw_top >= 0 else ""
+                    if not raw_piece.lstrip().startswith("<"):
+                        grammar_active = True
+                        allowed = int(self.tok.trace_json_grammar_mask_logits(self.gram_buf, self.tok_buf, logits_ptr))
+                        if allowed <= 0:
+                            break
 
             next_id = int(self.lm.trace_lm_sample_greedy(logits_ptr, self.vocab_size))
-            if next_id < 0 or next_id in (2, 128001, 128009):  # EOS / EOT LLaMA-3
+            if next_id < 0 or next_id in stop_ids:
                 break
 
             tok_confs.append(self._softmax_max_prob(self.logits, next_id))
@@ -249,10 +264,16 @@ class NativeTraceLMBackend:
             seq.append(next_id)
 
             if json_constrained:
-                if int(self.tok.trace_json_grammar_accept_token(self.gram_buf, self.tok_buf, next_id)) == 0:
-                    break
-                if int(self.tok.trace_json_grammar_is_done(self.gram_buf)):
-                    break
+                if grammar_active:
+                    if int(self.tok.trace_json_grammar_accept_token(self.gram_buf, self.tok_buf, next_id)) == 0:
+                        break
+                    if int(self.tok.trace_json_grammar_is_done(self.gram_buf)):
+                        break
+                else:
+                    partial = self._decode(gen_ids)
+                    if partial.rstrip().endswith("<tool_call>"):
+                        self.tok.trace_json_grammar_init(self.gram_buf)
+                        grammar_active = True
 
             if len(seq) >= self.max_ctx:
                 break
@@ -309,7 +330,7 @@ def main() -> None:
                 "overall_em": data["overall_em"],
                 "by_domain": data["by_domain"],
                 "long_docs_breakdown": data["long_docs_breakdown"],
-                "token_ece": round(data["token_ece"], 4),
+                "token_ece": round(data["token_ece"], 4) if data["token_ece"] is not None else None,
                 "response_brier": round(data["response_brier"], 4),
                 "valid_json_tool_calls": data["valid_json_tool_calls"],
                 "total_json_tool_calls": data["total_json_tool_calls"],

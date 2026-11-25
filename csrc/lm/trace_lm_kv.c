@@ -143,6 +143,7 @@ void trace_lm_kv_store(
     const float* k_pe_token
 ) {
     if (!kv || !c_kv_token || !k_pe_token ||
+        kv->attn_type != TRACE_ATTN_MLA || !kv->k_pe ||
         layer_idx < 0 || layer_idx >= kv->n_layers ||
         pos < 0 || pos >= kv->max_seq_len) {
         return;

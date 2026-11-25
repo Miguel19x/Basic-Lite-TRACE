@@ -121,7 +121,13 @@ class Sandbox:
             self._record("run_cmd", " ".join(argv), False, f"comando '{cmd}' fuera de allowlist")
             raise SandboxViolationError(f"Comando no permitido en sandbox: {cmd!r}")
 
-        # Bloquear argumentos con rutas absolutas fuera del sandbox o traversal '..'
+        # Bloquear ejecución inline de Python (-c / -m) y argumentos con rutas absolutas o '..'
+        if cmd == "python3":
+            for arg in argv[1:]:
+                if arg in ("-c", "-m", "-I", "-") or arg.startswith("-c") or arg.startswith("-m"):
+                    self._record("run_cmd", " ".join(argv), False, f"bandera python3 prohibida '{arg}'")
+                    raise SandboxViolationError(f"Bandera de python3 prohibida en sandbox: {arg!r}")
+
         for arg in argv[1:]:
             if "\x00" in arg:
                 self._record("run_cmd", " ".join(argv), False, "argumento con byte nulo")
@@ -129,6 +135,35 @@ class Sandbox:
             if arg.startswith("/") or ".." in Path(arg).parts:
                 self._record("run_cmd", " ".join(argv), False, f"ruta sospechosa en argumento '{arg}'")
                 raise SandboxViolationError(f"Argumento fuera del sandbox: {arg!r}")
+
+        run_argv = list(argv)
+        if cmd == "python3" and len(argv) >= 2:
+            # Confinar en tiempo de ejecución vía PEP 578 (sys.addaudithook): bloquea open/os/subprocess/socket fuera de root
+            script_target = self.resolve_path(argv[1], for_write=False)
+            if not script_target.is_file():
+                self._record("run_cmd", " ".join(argv), False, "script python no existe en sandbox")
+                raise FileNotFoundError(f"Script no encontrado en sandbox: {argv[1]}")
+            hook_bootstrap = (
+                "import pathlib, runpy, sys\n"
+                f"_ROOT = pathlib.Path({str(self.root)!r}).resolve()\n"
+                "_STDLIB = tuple(pathlib.Path(d).resolve() for d in {sys.prefix, sys.base_prefix, sys.exec_prefix} if d)\n"
+                "_FORBIDDEN = {'private', '.git', '.ssh', '.env'}\n"
+                "def _audit(ev, args):\n"
+                "    if ev.startswith(('subprocess.', 'socket.', 'os.system', 'os.posix_spawn', 'os.exec')):\n"
+                "        raise PermissionError(f'Blocked syscall in sandbox: {ev}')\n"
+                "    if ev == 'open' and args and isinstance(args[0], (str, bytes, pathlib.Path)):\n"
+                "        p = pathlib.Path(args[0].decode() if isinstance(args[0], bytes) else args[0]).resolve()\n"
+                "        mode = str(args[1]) if len(args) > 1 and args[1] is not None else 'r'\n"
+                "        is_ro = all(ch not in mode for ch in ('w', 'a', 'x', '+'))\n"
+                "        if is_ro and any(p.is_relative_to(s) for s in _STDLIB):\n"
+                "            return\n"
+                "        if not p.is_relative_to(_ROOT) or any(part in _FORBIDDEN for part in p.relative_to(_ROOT).parts):\n"
+                "            raise PermissionError(f'Blocked path outside sandbox: {p}')\n"
+                "sys.addaudithook(_audit)\n"
+                f"sys.argv = {argv[1:]!r}\n"
+                f"runpy.run_path({str(script_target)!r}, run_name='__main__')\n"
+            )
+            run_argv = ["python3", "-c", hook_bootstrap]
 
         env = {
             "PATH": "/usr/bin:/bin",
@@ -140,7 +175,7 @@ class Sandbox:
         self._record("run_cmd", " ".join(argv), True)
         try:
             proc = subprocess.run(
-                argv,
+                run_argv,
                 cwd=str(self.root),
                 env=env,
                 shell=False,

@@ -407,7 +407,12 @@ int trace_lm_forward(
             paged_linear_forward_act_int8(ws->h_norm, &layer->w_kr, ws->k_pe_tmp, S, ws, eps);
             #pragma omp parallel for schedule(static) if (S >= 16)
             for (int t = 0; t < S; ++t) {
-                apply_rope_c(ws->k_pe_tmp + (size_t)t * (size_t)qk_rope_head_dim, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
+                float* k_pe_t = ws->k_pe_tmp + (size_t)t * (size_t)qk_rope_head_dim;
+                if (model->cfg.rope_interleaved) {
+                    apply_rope_c(k_pe_t, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
+                } else {
+                    apply_rope_split_half_c(k_pe_t, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
+                }
             }
 
             // 4.5. Guardar c_kv y k_pe en el KV Cache para cada token nuevo
@@ -425,7 +430,11 @@ int trace_lm_forward(
             for (int t = 0; t < S; ++t) {
                 for (int h = 0; h < n_heads; ++h) {
                     float* q_pe_h = ws->q_pe + ((size_t)t * (size_t)n_heads + (size_t)h) * (size_t)qk_rope_head_dim;
-                    apply_rope_c(q_pe_h, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
+                    if (model->cfg.rope_interleaved) {
+                        apply_rope_c(q_pe_h, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
+                    } else {
+                        apply_rope_split_half_c(q_pe_h, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
+                    }
                 }
             }
 
@@ -589,6 +598,25 @@ void trace_lm_apply_repetition_penalty(
         return;
     }
 
+    if (num_tokens <= 256) {
+        for (int i = 0; i < num_tokens; ++i) {
+            int tok = tokens[i];
+            if (tok < 0 || tok >= vocab_size) continue;
+            int dup = 0;
+            for (int j = 0; j < i; ++j) {
+                if (tokens[j] == tok) {
+                    dup = 1;
+                    break;
+                }
+            }
+            if (!dup) {
+                if (logits[tok] > 0.0f) logits[tok] /= penalty;
+                else logits[tok] *= penalty;
+            }
+        }
+        return;
+    }
+
     uint8_t* seen = (uint8_t*)calloc((size_t)vocab_size, sizeof(uint8_t));
     if (!seen) return;
 
@@ -668,15 +696,93 @@ int trace_lm_sample(
         return trace_lm_sample_greedy(logits, vocab_size);
     }
 
+    // Ruta rápida O(V) sin malloc(1MB) ni qsort(128K) cuando top_k <= 256
+    if (top_k > 0 && top_k <= 256 && top_k < vocab_size) {
+        TraceTokenProb top[256];
+        int filled = 0;
+        int min_idx = 0;
+        float min_val = INFINITY;
+
+        for (int v = 0; v < vocab_size; ++v) {
+            float sc = logits[v];
+            if (!isfinite(sc)) continue;
+            if (filled < top_k) {
+                top[filled].id = v;
+                top[filled].prob = sc;
+                if (sc < min_val) {
+                    min_val = sc;
+                    min_idx = filled;
+                }
+                filled++;
+            } else if (sc > min_val) {
+                top[min_idx].id = v;
+                top[min_idx].prob = sc;
+                min_val = top[0].prob;
+                min_idx = 0;
+                for (int j = 1; j < top_k; ++j) {
+                    if (top[j].prob < min_val) {
+                        min_val = top[j].prob;
+                        min_idx = j;
+                    }
+                }
+            }
+        }
+        if (filled == 0) return 0;
+
+        float max_sc = -INFINITY;
+        for (int j = 0; j < filled; ++j) {
+            top[j].prob /= temperature;
+            if (top[j].prob > max_sc) max_sc = top[j].prob;
+        }
+        if (!isfinite(max_sc)) return top[0].id;
+
+        float sum_exp = 0.0f;
+        for (int j = 0; j < filled; ++j) {
+            float p = expf(top[j].prob - max_sc);
+            top[j].prob = p;
+            sum_exp += p;
+        }
+        if (!(sum_exp > 0.0f) || !isfinite(sum_exp)) return top[0].id;
+        float sum_inv = 1.0f / sum_exp;
+        for (int j = 0; j < filled; ++j) top[j].prob *= sum_inv;
+
+        qsort(top, (size_t)filled, sizeof(TraceTokenProb), compare_token_probs);
+
+        int n_cand = filled;
+        if (top_p > 0.0f && top_p < 1.0f) {
+            float cum = 0.0f;
+            int keep = 0;
+            for (int j = 0; j < n_cand; ++j) {
+                cum += top[j].prob;
+                keep = j + 1;
+                if (cum >= top_p) break;
+            }
+            n_cand = keep;
+        }
+        float renorm = 0.0f;
+        for (int j = 0; j < n_cand; ++j) renorm += top[j].prob;
+        float r = rand_uniform(rng_state) * renorm;
+        float acc = 0.0f;
+        for (int j = 0; j < n_cand; ++j) {
+            acc += top[j].prob;
+            if (r <= acc) return top[j].id;
+        }
+        return top[n_cand - 1].id;
+    }
+
     TraceTokenProb* items = (TraceTokenProb*)malloc(sizeof(TraceTokenProb) * (size_t)vocab_size);
     if (!items) return trace_lm_sample_greedy(logits, vocab_size);
 
     float max_sc = -INFINITY;
     for (int v = 0; v < vocab_size; ++v) {
         float scaled = logits[v] / temperature;
-        if (scaled > max_sc) max_sc = scaled;
+        if (isfinite(scaled) && scaled > max_sc) max_sc = scaled;
         items[v].id = v;
         items[v].prob = scaled;
+    }
+    if (!isfinite(max_sc)) {
+        free(items);
+        return 0;
     }
 
     float sum_exp = 0.0f;
