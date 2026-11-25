@@ -200,7 +200,7 @@ flowchart TD
 │   └── serialization/                        # Paged BitCOS v1 / v1.1 reader/writer
 ├── scripts/ / notebooks/                     # LM corpus, DDP training, benchmarks & GPU pilot notebooks
 ├── tests/                                    # 15 verification suites (AVX2, O_DIRECT, parity, MLA, E0, CLI)
-├── docs/                                     # Benchmarks, roadmaps, provenance, SHA-256 + RFC 3161 (.tsr)
+├── docs/                                     # Benchmarks, provenance, SHA-256 + RFC 3161 (.tsr)
 ├── results/                                  # Confirmatory multi-seed JSONs & benchmark artifacts
 ├── pyproject.toml / requirements.txt / Makefile / ruff.toml
 ├── LICENSE.txt / LICENSE-EN.md               # Binding Source-Available license (ES) & reference (EN)
