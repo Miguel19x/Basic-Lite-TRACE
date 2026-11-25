@@ -94,30 +94,54 @@ python train.py --steps 1000 --batch_size 32 --warmup_ratio 0.40 --device cpu
 ```mermaid
 flowchart TD
     subgraph InputStage ["1. Input & Positional Encoding"]
-        RawBytes["Raw Text / Input Stream"]:::input --> BytePatch["ASCII Bytes (260, Ph. 1–2) / Compact BPE (4K–8K, Ph. 3, 1:1 Digits)"]:::input
-        RawBytes --> AbacusLayer["Abacus Positional Embedding (Ph. 1–2: U=0, D=1, C=2)"]:::input
-        BytePatch & AbacusLayer --> CombinedEmbed["Token & Positional Representations"]:::input
-    end
-
-    subgraph CoreTernary ["2. Resident Ternary Core (W1.58A8 — AVX2/FMA C Kernels)"]
-        CombinedEmbed --> SharedCore["BitLinear W1.58A8 Core (0 FP32 Weights in RAM)"]:::core
-        SharedCore --> MLA["Phase 3: Ternary MLA (4x–15.75x KV) + Squared-ReLU FFN"]:::core
-        SharedCore --> PagedMoE["Phases 1–2: Ternary GQA (4:2) + Resident MoE (4 Experts + Shared)"]:::core
-    end
-
-    subgraph TwoStageField ["3. Execution Heads & Output Contracts"]
-        PagedMoE --> Stage1["Ph. 1–2 STAGE 1: Subtotals (pw, pms)"]:::causal
-        Stage1 --> CausalAnchor["Causal Anchor with Stop-Gradient (detach)"]:::gate
-        CausalAnchor --> Stage2["Ph. 1–2 STAGE 2: Conditioned Totals (watt, ms)"]:::causal
-        Stage2 --> OutputBytes["Fixed-Width Output (watt: 000 / ms: 000)"]:::causal
-        MLA --> LMHead["Phase 3: Tied Embeddings LM Head (trace_lm, 214–237 tok/s)"]:::lm
+        direction TB
+        RawBytes["Raw Text / Input Stream"]:::input
+        BytePatch["ASCII Bytes (260, Ph. 1–2) / BPE (4K–8K, Ph. 3)"]:::input
+        AbacusLayer["Abacus Embedding (Ph. 1–2: U=0, D=1, C=2)"]:::input
+        CombinedEmbed["Token & Positional Representations"]:::input
+        RawBytes --> BytePatch
+        RawBytes --> AbacusLayer
+        BytePatch --> CombinedEmbed
+        AbacusLayer --> CombinedEmbed
     end
 
     subgraph MemoryHierarchy ["4. Physical Resource Managers"]
-        PagedBitCOS[("Paged BitCOS v1/v1.1 (4 KB Pages on NVMe)")]:::storage <--> PagePool["Contiguous RAM Page Pool (O_DIRECT + pread)"]:::runtime
-        PagePool <--> PagedMoE
-        L1RAM["Tier 1: Active RAM (INT8 / FP32 KV)"]:::runtime <--> L2Latent["Tier 2: Compressed Latents"]:::runtime <--> L3SQLite[("Tier 3: SQLite FTS5 on Disk")]:::storage
+        direction TB
+        PagedBitCOS[("Paged BitCOS v1.1 (4 KB NVMe)")]:::storage
+        PagePool["RAM Page Pool (O_DIRECT + pread)"]:::runtime
+        L1RAM["L1: Active RAM (INT8 / FP32 KV)"]:::runtime
+        L2Latent["L2: Compressed Latents"]:::runtime
+        L3SQLite[("L3: SQLite FTS5 Disk")]:::storage
+        PagedBitCOS <--> PagePool
+        L1RAM <--> L2Latent
+        L2Latent <--> L3SQLite
     end
+
+    subgraph CoreTernary ["2. Resident Ternary Core (W1.58A8 — AVX2/FMA)"]
+        direction TB
+        SharedCore["BitLinear W1.58A8 Core (0 FP32 Weights)"]:::core
+        MLA["Phase 3: Ternary MLA (4x–15.75x KV) + FFN"]:::core
+        PagedMoE["Phases 1–2: Ternary GQA (4:2) + Resident MoE"]:::core
+        SharedCore --> MLA
+        SharedCore --> PagedMoE
+    end
+
+    subgraph TwoStageField ["3. Execution Heads & Output Contracts"]
+        direction TB
+        Stage1["Ph. 1–2 STAGE 1: Subtotals (pw, pms)"]:::causal
+        CausalAnchor["Causal Anchor (Stop-Gradient detach)"]:::gate
+        Stage2["Ph. 1–2 STAGE 2: Totals (watt, ms)"]:::causal
+        OutputBytes["Fixed-Width Output (watt: 000 / ms: 000)"]:::causal
+        LMHead["Phase 3: Tied LM Head (trace_lm, 214–237 tok/s)"]:::lm
+        Stage1 --> CausalAnchor
+        CausalAnchor --> Stage2
+        Stage2 --> OutputBytes
+    end
+
+    CombinedEmbed --> SharedCore
+    PagePool <--> PagedMoE
+    PagedMoE --> Stage1
+    MLA --> LMHead
 
     classDef input fill:#0c4a6e,stroke:#38bdf8,stroke-width:2px,color:#f0f9ff
     classDef core fill:#3b0764,stroke:#a78bfa,stroke-width:2px,color:#f5f3ff
