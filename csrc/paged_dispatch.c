@@ -22,6 +22,7 @@ void paged_absorb_uk_f32_scalar(const float* q_c, const uint8_t* const* page_ptr
 void paged_absorb_uv_f32_scalar(const float* o_latent, const uint8_t* const* page_ptrs, int num_pages, float scale, float* o_heads, int n_heads, int v_head_dim, int kv_lora_rank, int S);
 float trace_dot_f32_scalar(const float* a, const float* b, int n);
 void trace_axpy_f32_scalar(float* y, float a, const float* x, int n);
+void trace_mla_attn_group_f32_scalar(const float* q_c_abs_base, const float* q_pe_base, const float* c_kv_layer, const float* k_pe_layer, float* o_lat_base, float* scores_scratch, int h_start, int h_count, int total_len, int kv_lora_rank, int qk_rope_head_dim, float attn_scale);
 
 // 2. AVX2 + FMA
 #if defined(TRACE_ENABLE_AVX2) && (defined(__x86_64__) || defined(_M_X64))
@@ -33,6 +34,7 @@ void paged_absorb_uk_f32_avx2(const float* q_c, const uint8_t* const* page_ptrs,
 void paged_absorb_uv_f32_avx2(const float* o_latent, const uint8_t* const* page_ptrs, int num_pages, float scale, float* o_heads, int n_heads, int v_head_dim, int kv_lora_rank, int S);
 float trace_dot_f32_avx2(const float* a, const float* b, int n);
 void trace_axpy_f32_avx2(float* y, float a, const float* x, int n);
+void trace_mla_attn_group_f32_avx2(const float* q_c_abs_base, const float* q_pe_base, const float* c_kv_layer, const float* k_pe_layer, float* o_lat_base, float* scores_scratch, int h_start, int h_count, int total_len, int kv_lora_rank, int qk_rope_head_dim, float attn_scale);
 #endif
 
 typedef struct {
@@ -45,6 +47,7 @@ typedef struct {
     paged_absorb_uv_f32_fn paged_absorb_uv_f32;
     trace_dot_f32_fn trace_dot_f32;
     trace_axpy_f32_fn trace_axpy_f32;
+    trace_mla_attn_group_f32_fn trace_mla_attn_group_f32;
 } TraceKernelTable;
 
 static const TraceKernelTable g_scalar_kernels = {
@@ -56,7 +59,8 @@ static const TraceKernelTable g_scalar_kernels = {
     paged_absorb_uk_f32_scalar,
     paged_absorb_uv_f32_scalar,
     trace_dot_f32_scalar,
-    trace_axpy_f32_scalar
+    trace_axpy_f32_scalar,
+    trace_mla_attn_group_f32_scalar
 };
 
 #if defined(TRACE_ENABLE_AVX2) && (defined(__x86_64__) || defined(_M_X64))
@@ -69,7 +73,8 @@ static const TraceKernelTable g_avx2_kernels = {
     paged_absorb_uk_f32_avx2,
     paged_absorb_uv_f32_avx2,
     trace_dot_f32_avx2,
-    trace_axpy_f32_avx2
+    trace_axpy_f32_avx2,
+    trace_mla_attn_group_f32_avx2
 };
 #endif
 
@@ -161,4 +166,25 @@ float trace_dot_f32(const float* a, const float* b, int n) {
 
 void trace_axpy_f32(float* y, float a, const float* x, int n) {
     trace_cpu_init_dispatch()->trace_axpy_f32(y, a, x, n);
+}
+
+void trace_mla_attn_group_f32(
+    const float* q_c_abs_base,
+    const float* q_pe_base,
+    const float* c_kv_layer,
+    const float* k_pe_layer,
+    float* o_lat_base,
+    float* scores_scratch,
+    int h_start,
+    int h_count,
+    int total_len,
+    int kv_lora_rank,
+    int qk_rope_head_dim,
+    float attn_scale
+) {
+    trace_cpu_init_dispatch()->trace_mla_attn_group_f32(
+        q_c_abs_base, q_pe_base, c_kv_layer, k_pe_layer, o_lat_base,
+        scores_scratch, h_start, h_count, total_len, kv_lora_rank,
+        qk_rope_head_dim, attn_scale
+    );
 }

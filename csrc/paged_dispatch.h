@@ -89,6 +89,21 @@ typedef void (*trace_axpy_f32_fn)(
     int n
 );
 
+typedef void (*trace_mla_attn_group_f32_fn)(
+    const float* q_c_abs_base,
+    const float* q_pe_base,
+    const float* c_kv_layer,
+    const float* k_pe_layer,
+    float* o_lat_base,
+    float* scores_scratch,
+    int h_start,
+    int h_count,
+    int total_len,
+    int kv_lora_rank,
+    int qk_rope_head_dim,
+    float attn_scale
+);
+
 // Funciones públicas exportadas con despacho dinámico transparente
 void paged_direct_matmul_fast_c(
     const int8_t* x,
@@ -160,6 +175,21 @@ void trace_axpy_f32(
     float a,
     const float* x,
     int n
+);
+
+void trace_mla_attn_group_f32(
+    const float* q_c_abs_base,
+    const float* q_pe_base,
+    const float* c_kv_layer,
+    const float* k_pe_layer,
+    float* o_lat_base,
+    float* scores_scratch,
+    int h_start,
+    int h_count,
+    int total_len,
+    int kv_lora_rank,
+    int qk_rope_head_dim,
+    float attn_scale
 );
 
 // Consulta y configuración de ISA activa

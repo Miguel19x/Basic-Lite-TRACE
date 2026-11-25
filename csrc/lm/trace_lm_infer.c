@@ -13,6 +13,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 TraceLMWorkspace* trace_lm_workspace_create(const TraceLMConfig* cfg, int max_batch_seq) {
     if (!cfg || max_batch_seq <= 0) return NULL;
@@ -57,11 +60,18 @@ TraceLMWorkspace* trace_lm_workspace_create(const TraceLMConfig* cfg, int max_ba
     ALLOC_MEM(ws->scale_x, (size_t)max_batch_seq * sizeof(float));
     ALLOC_MEM(ws->acc_int32, (size_t)max_batch_seq * (size_t)max_out_dim * sizeof(int32_t));
 
+    int max_threads = 1;
+#ifdef _OPENMP
+    max_threads = omp_get_max_threads();
+    if (max_threads < 1) max_threads = 1;
+#endif
+    ws->max_threads = max_threads;
+
     ALLOC_MEM(ws->q_c, (size_t)max_batch_seq * (size_t)q_nope_dim * sizeof(float));
     ALLOC_MEM(ws->q_pe, (size_t)max_batch_seq * (size_t)q_rope_dim * sizeof(float));
     ALLOC_MEM(ws->q_c_absorbed, (size_t)max_batch_seq * (size_t)n_heads * (size_t)kv_lora_rank * sizeof(float));
-    ALLOC_MEM(ws->scores, (size_t)n_heads * (size_t)max_batch_seq * (size_t)cfg->max_seq_len * sizeof(float));
-    ALLOC_MEM(ws->attn_probs, (size_t)n_heads * (size_t)max_batch_seq * (size_t)cfg->max_seq_len * sizeof(float));
+    ALLOC_MEM(ws->scores, (size_t)max_threads * 4 * (size_t)cfg->max_seq_len * sizeof(float));
+    ws->attn_probs = NULL;
     ALLOC_MEM(ws->o_latent, (size_t)n_heads * (size_t)max_batch_seq * (size_t)kv_lora_rank * sizeof(float));
     ALLOC_MEM(ws->o_heads, (size_t)max_batch_seq * (size_t)v_dim * sizeof(float));
     ALLOC_MEM(ws->ffn_hidden, (size_t)max_batch_seq * (size_t)d_ff * sizeof(float));
@@ -71,6 +81,7 @@ TraceLMWorkspace* trace_lm_workspace_create(const TraceLMConfig* cfg, int max_ba
     ALLOC_MEM(ws->k_pe_tmp, (size_t)max_batch_seq * (size_t)cfg->qk_rope_head_dim * sizeof(float));
     ALLOC_MEM(ws->attn_out, (size_t)max_batch_seq * (size_t)d_model * sizeof(float));
     ALLOC_MEM(ws->ffn_out, (size_t)max_batch_seq * (size_t)d_model * sizeof(float));
+    ALLOC_MEM(ws->c_kv_dequant, (size_t)cfg->max_seq_len * (size_t)kv_lora_rank * sizeof(float));
     #undef ALLOC_MEM
 
     return ws;
@@ -97,6 +108,7 @@ void trace_lm_workspace_free(TraceLMWorkspace* ws) {
     if (ws->k_pe_tmp) free(ws->k_pe_tmp);
     if (ws->attn_out) free(ws->attn_out);
     if (ws->ffn_out) free(ws->ffn_out);
+    if (ws->c_kv_dequant) free(ws->c_kv_dequant);
     free(ws);
 }
 
@@ -112,14 +124,12 @@ static void paged_linear_forward_act_int8(
     int in_f = lin->in_features;
     int out_f = lin->out_features;
 
-    // 1. RMSNorm sub_ln
+    // 1-2. RMSNorm sub_ln + Cuantizacion simetrica a INT8 fusionados por fila (caliente en L1)
+    #pragma omp parallel for schedule(static) if (M >= 16)
     for (int m = 0; m < M; ++m) {
-        rms_norm(in + m * in_f, lin->sub_ln_w, ws->x_norm + m * in_f, in_f, eps);
-    }
+        float* row = ws->x_norm + (size_t)m * (size_t)in_f;
+        rms_norm(in + (size_t)m * (size_t)in_f, lin->sub_ln_w, row, in_f, eps);
 
-    // 2. Cuantizacion simetrica a INT8
-    for (int m = 0; m < M; ++m) {
-        const float* row = ws->x_norm + m * in_f;
         float amax = eps;
         for (int i = 0; i < in_f; ++i) {
             float v = fabsf(row[i]);
@@ -143,10 +153,11 @@ static void paged_linear_forward_act_int8(
     paged_direct_matmul_fast_c_multi(ws->q_x, lin->page_ptrs, lin->num_pages, ws->acc_int32, M, in_f, out_f);
 
     // 4. Descuantizacion
+    #pragma omp parallel for schedule(static) if (M >= 16)
     for (int m = 0; m < M; ++m) {
         float factor = ws->scale_x[m] * lin->scale;
-        const int32_t* acc_row = ws->acc_int32 + m * out_f;
-        float* out_row = out + m * out_f;
+        const int32_t* acc_row = ws->acc_int32 + (size_t)m * (size_t)out_f;
+        float* out_row = out + (size_t)m * (size_t)out_f;
         for (int i = 0; i < out_f; ++i) {
             out_row[i] = (float)acc_row[i] * factor;
         }
@@ -222,6 +233,7 @@ int trace_lm_forward(
         TraceLMLayer* layer = &model->layers[l];
 
         // 4.1. RMSNorm previo a atencion (escribe en h_norm, preservando x_norm para sub_ln)
+        #pragma omp parallel for schedule(static) if (S >= 16)
         for (int t = 0; t < S; ++t) {
             rms_norm(ws->x + (size_t)t * (size_t)d_model, layer->attn_norm_w, ws->h_norm + (size_t)t * (size_t)d_model, d_model, eps);
         }
@@ -230,17 +242,20 @@ int trace_lm_forward(
         paged_linear_forward_act_int8(ws->h_norm, &layer->w_dkv, ws->c_kv_tmp, S, ws, eps);
 
         // 4.3. Normalizacion de cuello de botella: kv_norm
+        #pragma omp parallel for schedule(static) if (S >= 16)
         for (int t = 0; t < S; ++t) {
             rms_norm(ws->c_kv_tmp + (size_t)t * (size_t)kv_lora_rank, layer->kv_norm_w, ws->c_kv_tmp + (size_t)t * (size_t)kv_lora_rank, kv_lora_rank, eps);
         }
 
         // 4.4. Proyeccion de clave rotacional: w_kr
         paged_linear_forward_act_int8(ws->h_norm, &layer->w_kr, ws->k_pe_tmp, S, ws, eps);
+        #pragma omp parallel for schedule(static) if (S >= 16)
         for (int t = 0; t < S; ++t) {
             apply_rope_c(ws->k_pe_tmp + (size_t)t * (size_t)qk_rope_head_dim, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
         }
 
         // 4.5. Guardar c_kv y k_pe en el KV Cache para cada token nuevo
+        #pragma omp parallel for schedule(static) if (S >= 16)
         for (int t = 0; t < S; ++t) {
             trace_lm_kv_store(kv, l, past_len + t, ws->c_kv_tmp + (size_t)t * (size_t)kv_lora_rank, ws->k_pe_tmp + (size_t)t * (size_t)qk_rope_head_dim);
         }
@@ -250,9 +265,10 @@ int trace_lm_forward(
         paged_linear_forward_act_int8(ws->h_norm, &layer->w_qr, ws->q_pe, S, ws, eps);
 
         // Aplicar RoPE sobre q_pe
+        #pragma omp parallel for schedule(static) if (S >= 16)
         for (int t = 0; t < S; ++t) {
             for (int h = 0; h < n_heads; ++h) {
-                float* q_pe_h = ws->q_pe + (size_t)(t * n_heads + h) * (size_t)qk_rope_head_dim;
+                float* q_pe_h = ws->q_pe + ((size_t)t * (size_t)n_heads + (size_t)h) * (size_t)qk_rope_head_dim;
                 apply_rope_c(q_pe_h, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
             }
         }
@@ -260,51 +276,71 @@ int trace_lm_forward(
         // 4.7. Absorcion 1: W_uk^T q_c via kernel despachado (0 matrices FP32 en RAM)
         paged_absorb_uk_f32(ws->q_c, layer->w_uk.page_ptrs, layer->w_uk.num_pages, layer->w_uk.scale, ws->q_c_absorbed, n_heads, qk_nope_head_dim, kv_lora_rank, S);
 
-        // 4.8. Atencion Causal Multi-Head Latente
-        float* c_kv_s = ws->c_kv_tmp_single;
-        for (int t = 0; t < S; ++t) {
-            int curr_pos = past_len + t;
-            int total_len = curr_pos + 1;
-
-            for (int h = 0; h < n_heads; ++h) {
-                const float* q_c_abs_h = ws->q_c_absorbed + (size_t)(t * n_heads + h) * (size_t)kv_lora_rank;
-                const float* q_pe_h = ws->q_pe + (size_t)(t * n_heads + h) * (size_t)qk_rope_head_dim;
-                float* scores_h = ws->scores + (size_t)(h * S + t) * (size_t)model->cfg.max_seq_len;
-
-                float max_sc = -INFINITY;
-                for (int s = 0; s < total_len; ++s) {
-                    trace_lm_kv_get_c_kv(kv, l, s, c_kv_s);
-                    const float* k_pe_s = trace_lm_kv_get_k_pe(kv, l, s);
-
-                    float dot_c = trace_dot_f32(q_c_abs_h, c_kv_s, kv_lora_rank);
-                    float dot_pe = trace_dot_f32(q_pe_h, k_pe_s, qk_rope_head_dim);
-                    float sc = (dot_c + dot_pe) * attn_scale;
-                    scores_h[s] = sc;
-                    if (sc > max_sc) max_sc = sc;
+        // 4.8. Atencion Causal Multi-Head Latente (descuantizacion unica por capa + 4 cabezas compartiendo KV)
+        int end_len = past_len + S;
+        const float* c_kv_layer = NULL;
+        if (kv->use_int8_kv) {
+            size_t layer_scale_base = (size_t)l * (size_t)kv->max_seq_len;
+            #pragma omp parallel for schedule(static) if (end_len >= 64)
+            for (int s = 0; s < end_len; ++s) {
+                size_t scale_idx = layer_scale_base + (size_t)s;
+                float sc = kv->c_kv_scales[scale_idx];
+                const int8_t* src = kv->c_kv_i8 + scale_idx * (size_t)kv_lora_rank;
+                float* dst = ws->c_kv_dequant + (size_t)s * (size_t)kv_lora_rank;
+                for (int c = 0; c < kv_lora_rank; ++c) {
+                    dst[c] = (float)src[c] * sc;
                 }
+            }
+            c_kv_layer = ws->c_kv_dequant;
+        } else {
+            c_kv_layer = kv->c_kv_fp32 + (size_t)l * (size_t)kv->max_seq_len * (size_t)kv_lora_rank;
+        }
+        const float* k_pe_layer = kv->k_pe + (size_t)l * (size_t)kv->max_seq_len * (size_t)qk_rope_head_dim;
 
-                // Softmax estable
-                float sum_exp = 0.0f;
-                float* probs_h = ws->attn_probs + (size_t)(h * S + t) * (size_t)model->cfg.max_seq_len;
-                for (int s = 0; s < total_len; ++s) {
-                    float p = expf(scores_h[s] - max_sc);
-                    probs_h[s] = p;
-                    sum_exp += p;
-                }
-                float sum_inv = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
-                for (int s = 0; s < total_len; ++s) {
-                    probs_h[s] *= sum_inv;
-                }
+        int n_threads = 1;
+#ifdef _OPENMP
+        n_threads = omp_get_max_threads();
+        if (n_threads > ws->max_threads) n_threads = ws->max_threads;
+        if (n_threads < 1) n_threads = 1;
+#endif
 
-                // Agregacion en espacio latente: o_latent = sum(probs * c_kv)
-                float* o_lat_h = ws->o_latent + (size_t)(t * n_heads + h) * (size_t)kv_lora_rank;
-                memset(o_lat_h, 0, sizeof(float) * (size_t)kv_lora_rank);
-                for (int s = 0; s < total_len; ++s) {
-                    float p = probs_h[s];
-                    if (p == 0.0f) continue;
-                    trace_lm_kv_get_c_kv(kv, l, s, c_kv_s);
-                    trace_axpy_f32(o_lat_h, p, c_kv_s, kv_lora_rank);
+        if (S >= 2) {
+            #pragma omp parallel for schedule(guided) num_threads(n_threads)
+            for (int t = 0; t < S; ++t) {
+                int tid = 0;
+#ifdef _OPENMP
+                tid = omp_get_thread_num();
+#endif
+                float* sc_buf = ws->scores + (size_t)tid * 4 * (size_t)model->cfg.max_seq_len;
+                int total_len = past_len + t + 1;
+                const float* q_c_t = ws->q_c_absorbed + (size_t)t * (size_t)n_heads * (size_t)kv_lora_rank;
+                const float* q_pe_t = ws->q_pe + (size_t)t * (size_t)n_heads * (size_t)qk_rope_head_dim;
+                float* o_lat_t = ws->o_latent + (size_t)t * (size_t)n_heads * (size_t)kv_lora_rank;
+
+                for (int h = 0; h < n_heads; h += 4) {
+                    int h_cnt = (h + 4 <= n_heads) ? 4 : (n_heads - h);
+                    trace_mla_attn_group_f32(
+                        q_c_t, q_pe_t, c_kv_layer, k_pe_layer, o_lat_t,
+                        sc_buf, h, h_cnt, total_len, kv_lora_rank, qk_rope_head_dim, attn_scale
+                    );
                 }
+            }
+        } else {
+            int total_len = past_len + 1;
+            int num_groups = (n_heads + 3) / 4;
+            #pragma omp parallel for schedule(static) num_threads(n_threads) if (num_groups >= 2 && total_len >= 64)
+            for (int g = 0; g < num_groups; ++g) {
+                int tid = 0;
+#ifdef _OPENMP
+                tid = omp_get_thread_num();
+#endif
+                float* sc_buf = ws->scores + (size_t)tid * 4 * (size_t)model->cfg.max_seq_len;
+                int h = g * 4;
+                int h_cnt = (h + 4 <= n_heads) ? 4 : (n_heads - h);
+                trace_mla_attn_group_f32(
+                    ws->q_c_absorbed, ws->q_pe, c_kv_layer, k_pe_layer, ws->o_latent,
+                    sc_buf, h, h_cnt, total_len, kv_lora_rank, qk_rope_head_dim, attn_scale
+                );
             }
         }
 
@@ -315,18 +351,23 @@ int trace_lm_forward(
         paged_linear_forward_act_int8(ws->o_heads, &layer->w_out, ws->attn_out, S, ws, eps);
 
         // Residual de atencion: x = x + attn_out
-        for (int i = 0; i < S * d_model; ++i) {
+        int total_d = S * d_model;
+        #pragma omp parallel for schedule(static) if (total_d >= 4096)
+        for (int i = 0; i < total_d; ++i) {
             ws->x[i] += ws->attn_out[i];
         }
 
         // 4.11. FFN: RMSNorm -> ffn_up -> Squared-ReLU -> ffn_down
+        #pragma omp parallel for schedule(static) if (S >= 16)
         for (int t = 0; t < S; ++t) {
             rms_norm(ws->x + (size_t)t * (size_t)d_model, layer->ffn_norm_w, ws->h_norm + (size_t)t * (size_t)d_model, d_model, eps);
         }
         paged_linear_forward_act_int8(ws->h_norm, &layer->ffn_up, ws->ffn_hidden, S, ws, eps);
 
         // Activacion Squared-ReLU: relu(x)^2
-        for (int i = 0; i < S * d_ff; ++i) {
+        int total_ff = S * d_ff;
+        #pragma omp parallel for schedule(static) if (total_ff >= 4096)
+        for (int i = 0; i < total_ff; ++i) {
             float val = ws->ffn_hidden[i];
             float r = (val > 0.0f) ? val : 0.0f;
             ws->ffn_hidden[i] = r * r;
@@ -335,12 +376,14 @@ int trace_lm_forward(
         paged_linear_forward_act_int8(ws->ffn_hidden, &layer->ffn_down, ws->ffn_out, S, ws, eps);
 
         // Residual FFN: x = x + ffn_out
-        for (int i = 0; i < S * d_model; ++i) {
+        #pragma omp parallel for schedule(static) if (total_d >= 4096)
+        for (int i = 0; i < total_d; ++i) {
             ws->x[i] += ws->ffn_out[i];
         }
     }
 
     // 5. Final RMSNorm
+    #pragma omp parallel for schedule(static) if (S >= 16)
     for (int t = 0; t < S; ++t) {
         rms_norm(ws->x + (size_t)t * (size_t)d_model, model->final_norm_w, ws->x_norm + (size_t)t * (size_t)d_model, d_model, eps);
     }
@@ -350,6 +393,7 @@ int trace_lm_forward(
     if (last_token_only) {
         // Optimizado para CLI / generacion: computa unicamente el ultimo token (S - 1)
         const float* x_last = ws->x_norm + (size_t)(S - 1) * (size_t)d_model;
+        #pragma omp parallel for schedule(static) if (vocab_size >= 256)
         for (int v = 0; v < vocab_size; ++v) {
             const float* emb_v = model->lm_head_w + (size_t)v * (size_t)d_model;
             out_logits[v] = trace_dot_f32(x_last, emb_v, d_model);
@@ -359,6 +403,7 @@ int trace_lm_forward(
         for (int t = 0; t < S; ++t) {
             const float* x_t = ws->x_norm + (size_t)t * (size_t)d_model;
             float* logits_t = out_logits + (size_t)t * (size_t)vocab_size;
+            #pragma omp parallel for schedule(static) if (vocab_size >= 256)
             for (int v = 0; v < vocab_size; ++v) {
                 const float* emb_v = model->lm_head_w + (size_t)v * (size_t)d_model;
                 logits_t[v] = trace_dot_f32(x_t, emb_v, d_model);

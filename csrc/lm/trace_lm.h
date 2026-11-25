@@ -101,6 +101,8 @@ typedef struct {
     float* k_pe_tmp;       // [max_batch_seq * qk_rope_head_dim]
     float* attn_out;       // [max_batch_seq * d_model]
     float* ffn_out;        // [max_batch_seq * d_model]
+    float* c_kv_dequant;   // [max_seq_len * kv_lora_rank] (descuantizacion unica por capa)
+    int max_threads;       // Hilos maximos reservados en ws->scores
 } TraceLMWorkspace;
 
 // Carga y destrucción de modelo

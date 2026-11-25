@@ -10,6 +10,7 @@
 #include "trace_infer.h"
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 #include <omp.h>
 
 #define OMP_MIN_WORK_THRESHOLD 65536
@@ -247,5 +248,58 @@ float trace_dot_f32_scalar(const float* a, const float* b, int n) {
 void trace_axpy_f32_scalar(float* y, float a, const float* x, int n) {
     for (int i = 0; i < n; ++i) {
         y[i] += a * x[i];
+    }
+}
+
+void trace_mla_attn_group_f32_scalar(
+    const float* q_c_abs_base,
+    const float* q_pe_base,
+    const float* c_kv_layer,
+    const float* k_pe_layer,
+    float* o_lat_base,
+    float* scores_scratch,
+    int h_start,
+    int h_count,
+    int total_len,
+    int kv_lora_rank,
+    int qk_rope_head_dim,
+    float attn_scale
+) {
+    for (int gh = 0; gh < h_count; ++gh) {
+        int h = h_start + gh;
+        const float* q_c_h = q_c_abs_base + (size_t)h * (size_t)kv_lora_rank;
+        const float* q_pe_h = q_pe_base + (size_t)h * (size_t)qk_rope_head_dim;
+        float* sc_h = scores_scratch + (size_t)gh * (size_t)total_len;
+
+        float max_sc = -INFINITY;
+        for (int s = 0; s < total_len; ++s) {
+            const float* c_kv_s = c_kv_layer + (size_t)s * (size_t)kv_lora_rank;
+            const float* k_pe_s = k_pe_layer + (size_t)s * (size_t)qk_rope_head_dim;
+            float dot_c = trace_dot_f32_scalar(q_c_h, c_kv_s, kv_lora_rank);
+            float dot_pe = trace_dot_f32_scalar(q_pe_h, k_pe_s, qk_rope_head_dim);
+            float sc = (dot_c + dot_pe) * attn_scale;
+            sc_h[s] = sc;
+            if (sc > max_sc) max_sc = sc;
+        }
+
+        float sum_exp = 0.0f;
+        for (int s = 0; s < total_len; ++s) {
+            float p = expf(sc_h[s] - max_sc);
+            sc_h[s] = p;
+            sum_exp += p;
+        }
+        float sum_inv = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
+        for (int s = 0; s < total_len; ++s) {
+            sc_h[s] *= sum_inv;
+        }
+
+        float* o_lat_h = o_lat_base + (size_t)h * (size_t)kv_lora_rank;
+        memset(o_lat_h, 0, sizeof(float) * (size_t)kv_lora_rank);
+        for (int s = 0; s < total_len; ++s) {
+            float p = sc_h[s];
+            if (p == 0.0f) continue;
+            const float* c_kv_s = c_kv_layer + (size_t)s * (size_t)kv_lora_rank;
+            trace_axpy_f32_scalar(o_lat_h, p, c_kv_s, kv_lora_rank);
+        }
     }
 }
