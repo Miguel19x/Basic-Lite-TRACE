@@ -234,6 +234,12 @@ def load_trace_lm_lib() -> ctypes.CDLL:
     lib.trace_lm_get_used_odirect.argtypes = [ctypes.c_void_p]
     lib.trace_lm_get_used_odirect.restype = ctypes.c_int
 
+    lib.trace_lm_get_tok_emb_dtype.argtypes = [ctypes.c_void_p]
+    lib.trace_lm_get_tok_emb_dtype.restype = ctypes.c_int
+
+    lib.trace_lm_get_attn_type.argtypes = [ctypes.c_void_p]
+    lib.trace_lm_get_attn_type.restype = ctypes.c_int
+
     lib.trace_lm_kv_get_last_common_prefix.argtypes = [ctypes.c_void_p]
     lib.trace_lm_kv_get_last_common_prefix.restype = ctypes.c_int
 

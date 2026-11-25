@@ -127,11 +127,15 @@ class PagedBitCOSSerializer:
         format_type: str = "compact",
         architecture: str | None = None,
         config: dict[str, Any] | None = None,
+        embedding_dtype: str = "float32",
     ) -> dict[str, Any]:
         """
         Exporta el modelo a un archivo binario Paged BitCOS alineado a páginas.
         Separa componentes residentes (embeddings, normas) de páginas ternarias (pesos de proyección y expertos).
+        `embedding_dtype`: "float32" (por defecto), "float16" (2x ahorro) o "int8" (4x ahorro por fila).
         """
+        if embedding_dtype not in ("float32", "float16", "int8"):
+            raise ValueError(f"embedding_dtype no soportado: {embedding_dtype!r}. Usa 'float32', 'float16' o 'int8'.")
         if architecture is None and config is None and hasattr(model, "cfg"):
             cfg_obj = model.cfg
             cls_name = cfg_obj.__class__.__name__
@@ -232,7 +236,19 @@ class PagedBitCOSSerializer:
             )
             if not is_bitlinear_weight and param.numel() > 0:
                 p_np = param.detach().float().cpu().numpy().astype(np.float32)
-                p_bytes = p_np.tobytes()
+                is_emb_matrix = name in ("tok_emb.weight", "lm_head.weight") and p_np.ndim == 2
+                if is_emb_matrix and embedding_dtype == "float16":
+                    p_bytes = p_np.astype(np.float16).tobytes()
+                    out_dtype = "float16"
+                elif is_emb_matrix and embedding_dtype == "int8":
+                    amax = np.maximum(np.max(np.abs(p_np), axis=-1), 1e-6).astype(np.float32)
+                    scales = (amax / 127.0).astype(np.float32)
+                    q = np.clip(np.rint(p_np / scales[:, None]), -127, 127).astype(np.int8)
+                    p_bytes = q.tobytes() + scales.tobytes()
+                    out_dtype = "int8"
+                else:
+                    p_bytes = p_np.tobytes()
+                    out_dtype = "float32"
                 p_offset = resident_bytes.tell()
                 resident_bytes.write(p_bytes)
                 tensor_index.append({
@@ -241,7 +257,7 @@ class PagedBitCOSSerializer:
                     "is_resident": True,
                     "offset": p_offset,
                     "length": len(p_bytes),
-                    "dtype": "float32",
+                    "dtype": out_dtype,
                 })
 
         # Serializar índices en bloques JSON/Binario con metadatos de arquitectura

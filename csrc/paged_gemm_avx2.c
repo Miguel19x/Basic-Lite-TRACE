@@ -11,6 +11,7 @@
 #include "paged_dispatch.h"
 #include "trace_infer.h"
 #include "paged_unpack.h"
+#include "trace_math.h"
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
@@ -811,6 +812,222 @@ void trace_mla_attn_group_f32_avx2(
             if (p == 0.0f) continue;
             const float* c_kv_s = c_kv_layer + (size_t)s * (size_t)kv_lora_rank;
             trace_axpy_f32_avx2(o_lat_h, p, c_kv_s, kv_lora_rank);
+        }
+    }
+}
+
+float trace_dot_f32_f16_avx2(const float* x, const uint16_t* w_f16, int n) {
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m128i h0 = _mm_loadu_si128((const __m128i*)(w_f16 + i));
+        __m128i h1 = _mm_loadu_si128((const __m128i*)(w_f16 + i + 8));
+        __m256 w0 = _mm256_cvtph_ps(h0);
+        __m256 w1 = _mm256_cvtph_ps(h1);
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i), w0, acc0);
+        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i + 8), w1, acc1);
+    }
+    for (; i + 8 <= n; i += 8) {
+        __m128i h0 = _mm_loadu_si128((const __m128i*)(w_f16 + i));
+        __m256 w0 = _mm256_cvtph_ps(h0);
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i), w0, acc0);
+    }
+    float dot = hsum_ps_avx2(_mm256_add_ps(acc0, acc1));
+    for (; i < n; ++i) {
+        dot += x[i] * trace_f16_to_f32(w_f16[i]);
+    }
+    return dot;
+}
+
+float trace_dot_f32_i8_avx2(const float* x, const int8_t* w_i8, float scale, int n) {
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m128i b = _mm_loadu_si128((const __m128i*)(w_i8 + i));
+        __m256 w0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b));
+        __m256 w1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(b, 8)));
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i), w0, acc0);
+        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i + 8), w1, acc1);
+    }
+    for (; i + 8 <= n; i += 8) {
+        __m128i b = _mm_loadl_epi64((const __m128i*)(w_i8 + i));
+        __m256 w0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b));
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i), w0, acc0);
+    }
+    float dot = hsum_ps_avx2(_mm256_add_ps(acc0, acc1));
+    for (; i < n; ++i) {
+        dot += x[i] * (float)w_i8[i];
+    }
+    return dot * scale;
+}
+
+void trace_gqa_attn_group_f32_avx2(
+    const float* q_base,
+    const float* k_layer,
+    const float* v_layer,
+    float* o_heads_base,
+    float* scores_scratch,
+    int kv_h,
+    int q_start,
+    int q_count,
+    int n_kv_heads,
+    int total_len,
+    int head_dim,
+    float attn_scale
+) {
+    size_t kv_stride = (size_t)n_kv_heads * (size_t)head_dim;
+    size_t kv_off = (size_t)kv_h * (size_t)head_dim;
+
+    if (q_count == 4) {
+        const float* q0 = q_base + (size_t)(q_start + 0) * (size_t)head_dim;
+        const float* q1 = q_base + (size_t)(q_start + 1) * (size_t)head_dim;
+        const float* q2 = q_base + (size_t)(q_start + 2) * (size_t)head_dim;
+        const float* q3 = q_base + (size_t)(q_start + 3) * (size_t)head_dim;
+
+        float* sc0 = scores_scratch + (size_t)0 * (size_t)total_len;
+        float* sc1 = scores_scratch + (size_t)1 * (size_t)total_len;
+        float* sc2 = scores_scratch + (size_t)2 * (size_t)total_len;
+        float* sc3 = scores_scratch + (size_t)3 * (size_t)total_len;
+
+        float max0 = -INFINITY;
+        float max1 = -INFINITY;
+        float max2 = -INFINITY;
+        float max3 = -INFINITY;
+
+        for (int s = 0; s < total_len; ++s) {
+            const float* k_s = k_layer + (size_t)s * kv_stride + kv_off;
+            __m256 a0 = _mm256_setzero_ps();
+            __m256 a1 = _mm256_setzero_ps();
+            __m256 a2 = _mm256_setzero_ps();
+            __m256 a3 = _mm256_setzero_ps();
+            int i = 0;
+            for (; i + 8 <= head_dim; i += 8) {
+                __m256 vk = _mm256_loadu_ps(k_s + i);
+                a0 = _mm256_fmadd_ps(vk, _mm256_loadu_ps(q0 + i), a0);
+                a1 = _mm256_fmadd_ps(vk, _mm256_loadu_ps(q1 + i), a1);
+                a2 = _mm256_fmadd_ps(vk, _mm256_loadu_ps(q2 + i), a2);
+                a3 = _mm256_fmadd_ps(vk, _mm256_loadu_ps(q3 + i), a3);
+            }
+            float d0 = hsum_ps_avx2(a0);
+            float d1 = hsum_ps_avx2(a1);
+            float d2 = hsum_ps_avx2(a2);
+            float d3 = hsum_ps_avx2(a3);
+            for (; i < head_dim; ++i) {
+                float vk = k_s[i];
+                d0 += vk * q0[i];
+                d1 += vk * q1[i];
+                d2 += vk * q2[i];
+                d3 += vk * q3[i];
+            }
+            float v0 = d0 * attn_scale;
+            float v1 = d1 * attn_scale;
+            float v2 = d2 * attn_scale;
+            float v3 = d3 * attn_scale;
+            sc0[s] = v0;
+            sc1[s] = v1;
+            sc2[s] = v2;
+            sc3[s] = v3;
+            if (v0 > max0) max0 = v0;
+            if (v1 > max1) max1 = v1;
+            if (v2 > max2) max2 = v2;
+            if (v3 > max3) max3 = v3;
+        }
+
+        float maxv[4] = { max0, max1, max2, max3 };
+        for (int gh = 0; gh < 4; ++gh) {
+            float* sc = scores_scratch + (size_t)gh * (size_t)total_len;
+            float m = maxv[gh];
+            float sum_exp = 0.0f;
+            for (int s = 0; s < total_len; ++s) {
+                float e = expf(sc[s] - m);
+                sc[s] = e;
+                sum_exp += e;
+            }
+            float sum_inv = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
+            __m256 inv_vec = _mm256_set1_ps(sum_inv);
+            int s = 0;
+            for (; s + 8 <= total_len; s += 8) {
+                _mm256_storeu_ps(sc + s, _mm256_mul_ps(_mm256_loadu_ps(sc + s), inv_vec));
+            }
+            for (; s < total_len; ++s) {
+                sc[s] *= sum_inv;
+            }
+        }
+
+        float* o0 = o_heads_base + (size_t)(q_start + 0) * (size_t)head_dim;
+        float* o1 = o_heads_base + (size_t)(q_start + 1) * (size_t)head_dim;
+        float* o2 = o_heads_base + (size_t)(q_start + 2) * (size_t)head_dim;
+        float* o3 = o_heads_base + (size_t)(q_start + 3) * (size_t)head_dim;
+        memset(o0, 0, sizeof(float) * (size_t)head_dim);
+        memset(o1, 0, sizeof(float) * (size_t)head_dim);
+        memset(o2, 0, sizeof(float) * (size_t)head_dim);
+        memset(o3, 0, sizeof(float) * (size_t)head_dim);
+
+        for (int s = 0; s < total_len; ++s) {
+            float pr0 = sc0[s];
+            float pr1 = sc1[s];
+            float pr2 = sc2[s];
+            float pr3 = sc3[s];
+            if (pr0 == 0.0f && pr1 == 0.0f && pr2 == 0.0f && pr3 == 0.0f) continue;
+
+            const float* v_s = v_layer + (size_t)s * kv_stride + kv_off;
+            __m256 vp0 = _mm256_set1_ps(pr0);
+            __m256 vp1 = _mm256_set1_ps(pr1);
+            __m256 vp2 = _mm256_set1_ps(pr2);
+            __m256 vp3 = _mm256_set1_ps(pr3);
+
+            int i = 0;
+            for (; i + 8 <= head_dim; i += 8) {
+                __m256 vv = _mm256_loadu_ps(v_s + i);
+                _mm256_storeu_ps(o0 + i, _mm256_fmadd_ps(vp0, vv, _mm256_loadu_ps(o0 + i)));
+                _mm256_storeu_ps(o1 + i, _mm256_fmadd_ps(vp1, vv, _mm256_loadu_ps(o1 + i)));
+                _mm256_storeu_ps(o2 + i, _mm256_fmadd_ps(vp2, vv, _mm256_loadu_ps(o2 + i)));
+                _mm256_storeu_ps(o3 + i, _mm256_fmadd_ps(vp3, vv, _mm256_loadu_ps(o3 + i)));
+            }
+            for (; i < head_dim; ++i) {
+                float vv = v_s[i];
+                o0[i] += pr0 * vv;
+                o1[i] += pr1 * vv;
+                o2[i] += pr2 * vv;
+                o3[i] += pr3 * vv;
+            }
+        }
+        return;
+    }
+
+    for (int gh = 0; gh < q_count; ++gh) {
+        int qh = q_start + gh;
+        const float* q_h = q_base + (size_t)qh * (size_t)head_dim;
+        float* sc_h = scores_scratch + (size_t)gh * (size_t)total_len;
+
+        float max_sc = -INFINITY;
+        for (int s = 0; s < total_len; ++s) {
+            const float* k_s = k_layer + (size_t)s * kv_stride + kv_off;
+            float sc = trace_dot_f32_avx2(q_h, k_s, head_dim) * attn_scale;
+            sc_h[s] = sc;
+            if (sc > max_sc) max_sc = sc;
+        }
+
+        float sum_exp = 0.0f;
+        for (int s = 0; s < total_len; ++s) {
+            float p = expf(sc_h[s] - max_sc);
+            sc_h[s] = p;
+            sum_exp += p;
+        }
+        float sum_inv = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
+        for (int s = 0; s < total_len; ++s) {
+            sc_h[s] *= sum_inv;
+        }
+
+        float* o_h = o_heads_base + (size_t)qh * (size_t)head_dim;
+        memset(o_h, 0, sizeof(float) * (size_t)head_dim);
+        for (int s = 0; s < total_len; ++s) {
+            float p = sc_h[s];
+            if (p == 0.0f) continue;
+            const float* v_s = v_layer + (size_t)s * kv_stride + kv_off;
+            trace_axpy_f32_avx2(o_h, p, v_s, head_dim);
         }
     }
 }

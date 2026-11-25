@@ -8,6 +8,7 @@
 
 #include "paged_dispatch.h"
 #include "trace_infer.h"
+#include "trace_math.h"
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
@@ -300,6 +301,74 @@ void trace_mla_attn_group_f32_scalar(
             if (p == 0.0f) continue;
             const float* c_kv_s = c_kv_layer + (size_t)s * (size_t)kv_lora_rank;
             trace_axpy_f32_scalar(o_lat_h, p, c_kv_s, kv_lora_rank);
+        }
+    }
+}
+
+float trace_dot_f32_f16_scalar(const float* x, const uint16_t* w_f16, int n) {
+    float acc = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        acc += x[i] * trace_f16_to_f32(w_f16[i]);
+    }
+    return acc;
+}
+
+float trace_dot_f32_i8_scalar(const float* x, const int8_t* w_i8, float scale, int n) {
+    float acc = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        acc += x[i] * (float)w_i8[i];
+    }
+    return acc * scale;
+}
+
+void trace_gqa_attn_group_f32_scalar(
+    const float* q_base,
+    const float* k_layer,
+    const float* v_layer,
+    float* o_heads_base,
+    float* scores_scratch,
+    int kv_h,
+    int q_start,
+    int q_count,
+    int n_kv_heads,
+    int total_len,
+    int head_dim,
+    float attn_scale
+) {
+    size_t kv_stride = (size_t)n_kv_heads * (size_t)head_dim;
+    size_t kv_off = (size_t)kv_h * (size_t)head_dim;
+
+    for (int gh = 0; gh < q_count; ++gh) {
+        int qh = q_start + gh;
+        const float* q_h = q_base + (size_t)qh * (size_t)head_dim;
+        float* sc_h = scores_scratch + (size_t)gh * (size_t)total_len;
+
+        float max_sc = -INFINITY;
+        for (int s = 0; s < total_len; ++s) {
+            const float* k_s = k_layer + (size_t)s * kv_stride + kv_off;
+            float sc = trace_dot_f32_scalar(q_h, k_s, head_dim) * attn_scale;
+            sc_h[s] = sc;
+            if (sc > max_sc) max_sc = sc;
+        }
+
+        float sum_exp = 0.0f;
+        for (int s = 0; s < total_len; ++s) {
+            float p = expf(sc_h[s] - max_sc);
+            sc_h[s] = p;
+            sum_exp += p;
+        }
+        float sum_inv = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
+        for (int s = 0; s < total_len; ++s) {
+            sc_h[s] *= sum_inv;
+        }
+
+        float* o_h = o_heads_base + (size_t)qh * (size_t)head_dim;
+        memset(o_h, 0, sizeof(float) * (size_t)head_dim);
+        for (int s = 0; s < total_len; ++s) {
+            float p = sc_h[s];
+            if (p == 0.0f) continue;
+            const float* v_s = v_layer + (size_t)s * kv_stride + kv_off;
+            trace_axpy_f32_scalar(o_h, p, v_s, head_dim);
         }
     }
 }

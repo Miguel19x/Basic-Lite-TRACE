@@ -4,7 +4,7 @@ ARCH := $(shell uname -m)
 CFLAGS ?= -O3 -ffp-contract=off -fopenmp -Wall -Wextra -Werror -Wvla -I. -Icsrc
 PIC_CFLAGS ?= $(CFLAGS) -fPIC
 EXE_CFLAGS ?= $(CFLAGS)
-AVX2_FLAGS = -mavx2 -mfma -DTRACE_ENABLE_AVX2
+AVX2_FLAGS = -mavx2 -mfma -mf16c -DTRACE_ENABLE_AVX2
 
 ifeq ($(ARCH),x86_64)
     DISPATCH_OBJS = csrc/paged_dispatch.o csrc/paged_gemm_scalar.o csrc/paged_gemm_avx2.o

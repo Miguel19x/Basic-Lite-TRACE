@@ -26,10 +26,12 @@ TraceLMWorkspace* trace_lm_workspace_create(const TraceLMConfig* cfg, int max_ba
     int d_model = cfg->d_model;
     int d_ff = cfg->d_ff;
     int n_heads = cfg->n_heads;
-    int v_dim = n_heads * cfg->v_head_dim;
-    int q_nope_dim = n_heads * cfg->qk_nope_head_dim;
+    int is_gqa = (cfg->attn_type == TRACE_ATTN_GQA);
+    int v_dim = is_gqa ? (n_heads * cfg->head_dim) : (n_heads * cfg->v_head_dim);
+    int q_nope_dim = is_gqa ? (n_heads * cfg->head_dim) : (n_heads * cfg->qk_nope_head_dim);
     int q_rope_dim = n_heads * cfg->qk_rope_head_dim;
     int kv_lora_rank = cfg->kv_lora_rank;
+    int kv_dim = is_gqa ? (cfg->n_kv_heads * cfg->head_dim) : 0;
 
     // Dimensionamiento seguro contra desbordamiento en ffn.down y proyecciones
     int max_in_dim = d_model;
@@ -39,8 +41,12 @@ TraceLMWorkspace* trace_lm_workspace_create(const TraceLMConfig* cfg, int max_ba
     int max_out_dim = d_model;
     if (d_ff > max_out_dim) max_out_dim = d_ff;
     if (q_nope_dim > max_out_dim) max_out_dim = q_nope_dim;
-    if (q_rope_dim > max_out_dim) max_out_dim = q_rope_dim;
-    if (kv_lora_rank > max_out_dim) max_out_dim = kv_lora_rank;
+    if (!is_gqa) {
+        if (q_rope_dim > max_out_dim) max_out_dim = q_rope_dim;
+        if (kv_lora_rank > max_out_dim) max_out_dim = kv_lora_rank;
+    } else {
+        if (kv_dim > max_out_dim) max_out_dim = kv_dim;
+    }
 
     ws->max_batch_seq = max_batch_seq;
     ws->max_in_dim = max_in_dim;
@@ -68,20 +74,31 @@ TraceLMWorkspace* trace_lm_workspace_create(const TraceLMConfig* cfg, int max_ba
     ws->max_threads = max_threads;
 
     ALLOC_MEM(ws->q_c, (size_t)max_batch_seq * (size_t)q_nope_dim * sizeof(float));
-    ALLOC_MEM(ws->q_pe, (size_t)max_batch_seq * (size_t)q_rope_dim * sizeof(float));
-    ALLOC_MEM(ws->q_c_absorbed, (size_t)max_batch_seq * (size_t)n_heads * (size_t)kv_lora_rank * sizeof(float));
     ALLOC_MEM(ws->scores, (size_t)max_threads * 4 * (size_t)cfg->max_seq_len * sizeof(float));
     ws->attn_probs = NULL;
-    ALLOC_MEM(ws->o_latent, (size_t)n_heads * (size_t)max_batch_seq * (size_t)kv_lora_rank * sizeof(float));
     ALLOC_MEM(ws->o_heads, (size_t)max_batch_seq * (size_t)v_dim * sizeof(float));
     ALLOC_MEM(ws->ffn_hidden, (size_t)max_batch_seq * (size_t)d_ff * sizeof(float));
-
-    ALLOC_MEM(ws->c_kv_tmp, (size_t)max_batch_seq * (size_t)kv_lora_rank * sizeof(float));
-    ALLOC_MEM(ws->c_kv_tmp_single, (size_t)kv_lora_rank * sizeof(float));
-    ALLOC_MEM(ws->k_pe_tmp, (size_t)max_batch_seq * (size_t)cfg->qk_rope_head_dim * sizeof(float));
     ALLOC_MEM(ws->attn_out, (size_t)max_batch_seq * (size_t)d_model * sizeof(float));
     ALLOC_MEM(ws->ffn_out, (size_t)max_batch_seq * (size_t)d_model * sizeof(float));
-    ALLOC_MEM(ws->c_kv_dequant, (size_t)cfg->max_seq_len * (size_t)kv_lora_rank * sizeof(float));
+
+    if (cfg->use_gated_ffn) {
+        ALLOC_MEM(ws->ffn_gate_buf, (size_t)max_batch_seq * (size_t)d_ff * sizeof(float));
+    }
+
+    if (is_gqa) {
+        ALLOC_MEM(ws->gqa_k_tmp, (size_t)max_batch_seq * (size_t)kv_dim * sizeof(float));
+        ALLOC_MEM(ws->gqa_v_tmp, (size_t)max_batch_seq * (size_t)kv_dim * sizeof(float));
+        ALLOC_MEM(ws->gqa_k_dequant, (size_t)cfg->max_seq_len * (size_t)kv_dim * sizeof(float));
+        ALLOC_MEM(ws->gqa_v_dequant, (size_t)cfg->max_seq_len * (size_t)kv_dim * sizeof(float));
+    } else {
+        ALLOC_MEM(ws->q_pe, (size_t)max_batch_seq * (size_t)q_rope_dim * sizeof(float));
+        ALLOC_MEM(ws->q_c_absorbed, (size_t)max_batch_seq * (size_t)n_heads * (size_t)kv_lora_rank * sizeof(float));
+        ALLOC_MEM(ws->o_latent, (size_t)n_heads * (size_t)max_batch_seq * (size_t)kv_lora_rank * sizeof(float));
+        ALLOC_MEM(ws->c_kv_tmp, (size_t)max_batch_seq * (size_t)kv_lora_rank * sizeof(float));
+        ALLOC_MEM(ws->c_kv_tmp_single, (size_t)kv_lora_rank * sizeof(float));
+        ALLOC_MEM(ws->k_pe_tmp, (size_t)max_batch_seq * (size_t)cfg->qk_rope_head_dim * sizeof(float));
+        ALLOC_MEM(ws->c_kv_dequant, (size_t)cfg->max_seq_len * (size_t)kv_lora_rank * sizeof(float));
+    }
     #undef ALLOC_MEM
 
     return ws;
@@ -109,10 +126,15 @@ void trace_lm_workspace_free(TraceLMWorkspace* ws) {
     if (ws->attn_out) free(ws->attn_out);
     if (ws->ffn_out) free(ws->ffn_out);
     if (ws->c_kv_dequant) free(ws->c_kv_dequant);
+    if (ws->ffn_gate_buf) free(ws->ffn_gate_buf);
+    if (ws->gqa_k_tmp) free(ws->gqa_k_tmp);
+    if (ws->gqa_v_tmp) free(ws->gqa_v_tmp);
+    if (ws->gqa_k_dequant) free(ws->gqa_k_dequant);
+    if (ws->gqa_v_dequant) free(ws->gqa_v_dequant);
     free(ws);
 }
 
-// Proyeccion BitLinear estandar con sub_ln + cuantizacion INT8 + kernel AVX2 Add-Sub
+// Proyeccion BitLinear estandar con sub_ln opcional + cuantizacion INT8 + kernel AVX2 Add-Sub
 static void paged_linear_forward_act_int8(
     const float* in,
     const TraceLMPagedLinear* lin,
@@ -124,11 +146,18 @@ static void paged_linear_forward_act_int8(
     int in_f = lin->in_features;
     int out_f = lin->out_features;
 
-    // 1-2. RMSNorm sub_ln + Cuantizacion simetrica a INT8 fusionados por fila (caliente en L1)
+    // 1-2. RMSNorm sub_ln (si existe) + Cuantizacion simetrica a INT8 fusionados por fila
     #pragma omp parallel for schedule(static) if (M >= 16)
     for (int m = 0; m < M; ++m) {
-        float* row = ws->x_norm + (size_t)m * (size_t)in_f;
-        rms_norm(in + (size_t)m * (size_t)in_f, lin->sub_ln_w, row, in_f, eps);
+        const float* in_row = in + (size_t)m * (size_t)in_f;
+        const float* row;
+        if (lin->sub_ln_w != NULL) {
+            float* norm_row = ws->x_norm + (size_t)m * (size_t)in_f;
+            rms_norm(in_row, lin->sub_ln_w, norm_row, in_f, eps);
+            row = norm_row;
+        } else {
+            row = in_row;
+        }
 
         float amax = eps;
         for (int i = 0; i < in_f; ++i) {
@@ -172,8 +201,8 @@ static void apply_rope_c(
     const float* rope_cos,
     const float* rope_sin
 ) {
-    const float* c = rope_cos + pos * d_pe;
-    const float* s = rope_sin + pos * d_pe;
+    const float* c = rope_cos + (size_t)pos * (size_t)d_pe;
+    const float* s = rope_sin + (size_t)pos * (size_t)d_pe;
 
     for (int j = 0; j < d_pe; j += 2) {
         float x1 = v[j];
@@ -182,6 +211,28 @@ static void apply_rope_c(
         float s_val = s[j];
         v[j] = x1 * c_val - x2 * s_val;
         v[j + 1] = x2 * c_val + x1 * s_val;
+    }
+}
+
+// Aplicacion de RoPE split-half (LLaMA/BitNet): pares (j, j + head_dim / 2)
+static void apply_rope_split_half_c(
+    float* v,
+    int head_dim,
+    int pos,
+    const float* rope_cos,
+    const float* rope_sin
+) {
+    int half = head_dim / 2;
+    const float* c = rope_cos + (size_t)pos * (size_t)half;
+    const float* s = rope_sin + (size_t)pos * (size_t)half;
+
+    for (int j = 0; j < half; ++j) {
+        float x1 = v[j];
+        float x2 = v[j + half];
+        float c_val = c[j];
+        float s_val = s[j];
+        v[j] = x1 * c_val - x2 * s_val;
+        v[j + half] = x2 * c_val + x1 * s_val;
     }
 }
 
@@ -217,16 +268,42 @@ int trace_lm_forward(
     int qk_rope_head_dim = model->cfg.qk_rope_head_dim;
     int v_head_dim = model->cfg.v_head_dim;
     int kv_lora_rank = model->cfg.kv_lora_rank;
+    int is_gqa = (model->cfg.attn_type == TRACE_ATTN_GQA);
+    int n_kv_heads = model->cfg.n_kv_heads;
+    int head_dim = model->cfg.head_dim;
     float eps = model->cfg.eps;
-    float attn_scale = 1.0f / sqrtf((float)(qk_nope_head_dim + qk_rope_head_dim));
+    float attn_scale = is_gqa
+        ? (1.0f / sqrtf((float)head_dim))
+        : (1.0f / sqrtf((float)(qk_nope_head_dim + qk_rope_head_dim)));
 
-    // 3. Lookup de embeddings lexicos para los S tokens nuevos
+    // 3. Lookup de embeddings lexicos para los S tokens nuevos (FP32 / FP16 / INT8)
     for (int t = 0; t < S; ++t) {
         int tok = input_tokens[past_len + t];
         if (tok < 0 || tok >= model->cfg.vocab_size) tok = model->cfg.pad_token_id;
-        const float* emb_src = model->tok_emb + (size_t)tok * (size_t)d_model;
-        memcpy(ws->x + (size_t)t * (size_t)d_model, emb_src, sizeof(float) * (size_t)d_model);
+        float* dst = ws->x + (size_t)t * (size_t)d_model;
+        if (model->tok_emb_dtype == TRACE_EMB_FP16) {
+            const uint16_t* emb_src = model->tok_emb_f16 + (size_t)tok * (size_t)d_model;
+            for (int i = 0; i < d_model; ++i) {
+                dst[i] = trace_f16_to_f32(emb_src[i]);
+            }
+        } else if (model->tok_emb_dtype == TRACE_EMB_INT8) {
+            const int8_t* emb_src = model->tok_emb_i8 + (size_t)tok * (size_t)d_model;
+            float sc = model->tok_emb_scales[tok];
+            for (int i = 0; i < d_model; ++i) {
+                dst[i] = (float)emb_src[i] * sc;
+            }
+        } else {
+            const float* emb_src = model->tok_emb + (size_t)tok * (size_t)d_model;
+            memcpy(dst, emb_src, sizeof(float) * (size_t)d_model);
+        }
     }
+
+    int n_threads = 1;
+#ifdef _OPENMP
+    n_threads = omp_get_max_threads();
+    if (n_threads > ws->max_threads) n_threads = ws->max_threads;
+    if (n_threads < 1) n_threads = 1;
+#endif
 
     // 4. Bucle sobre capas Transformer
     for (int l = 0; l < model->cfg.n_layers; ++l) {
@@ -238,116 +315,226 @@ int trace_lm_forward(
             rms_norm(ws->x + (size_t)t * (size_t)d_model, layer->attn_norm_w, ws->h_norm + (size_t)t * (size_t)d_model, d_model, eps);
         }
 
-        // 4.2. Proyeccion KV latente: w_dkv
-        paged_linear_forward_act_int8(ws->h_norm, &layer->w_dkv, ws->c_kv_tmp, S, ws, eps);
+        if (is_gqa) {
+            // Ruta GQA (compatible con BitNet-b1.58-2B-4T)
+            paged_linear_forward_act_int8(ws->h_norm, &layer->w_q, ws->q_c, S, ws, eps);
+            paged_linear_forward_act_int8(ws->h_norm, &layer->w_k, ws->gqa_k_tmp, S, ws, eps);
+            paged_linear_forward_act_int8(ws->h_norm, &layer->w_v, ws->gqa_v_tmp, S, ws, eps);
 
-        // 4.3. Normalizacion de cuello de botella: kv_norm
-        #pragma omp parallel for schedule(static) if (S >= 16)
-        for (int t = 0; t < S; ++t) {
-            rms_norm(ws->c_kv_tmp + (size_t)t * (size_t)kv_lora_rank, layer->kv_norm_w, ws->c_kv_tmp + (size_t)t * (size_t)kv_lora_rank, kv_lora_rank, eps);
-        }
-
-        // 4.4. Proyeccion de clave rotacional: w_kr
-        paged_linear_forward_act_int8(ws->h_norm, &layer->w_kr, ws->k_pe_tmp, S, ws, eps);
-        #pragma omp parallel for schedule(static) if (S >= 16)
-        for (int t = 0; t < S; ++t) {
-            apply_rope_c(ws->k_pe_tmp + (size_t)t * (size_t)qk_rope_head_dim, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
-        }
-
-        // 4.5. Guardar c_kv y k_pe en el KV Cache para cada token nuevo
-        #pragma omp parallel for schedule(static) if (S >= 16)
-        for (int t = 0; t < S; ++t) {
-            trace_lm_kv_store(kv, l, past_len + t, ws->c_kv_tmp + (size_t)t * (size_t)kv_lora_rank, ws->k_pe_tmp + (size_t)t * (size_t)qk_rope_head_dim);
-        }
-
-        // 4.6. Proyecciones de consulta: w_q y w_qr
-        paged_linear_forward_act_int8(ws->h_norm, &layer->w_q, ws->q_c, S, ws, eps);
-        paged_linear_forward_act_int8(ws->h_norm, &layer->w_qr, ws->q_pe, S, ws, eps);
-
-        // Aplicar RoPE sobre q_pe
-        #pragma omp parallel for schedule(static) if (S >= 16)
-        for (int t = 0; t < S; ++t) {
-            for (int h = 0; h < n_heads; ++h) {
-                float* q_pe_h = ws->q_pe + ((size_t)t * (size_t)n_heads + (size_t)h) * (size_t)qk_rope_head_dim;
-                apply_rope_c(q_pe_h, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
-            }
-        }
-
-        // 4.7. Absorcion 1: W_uk^T q_c via kernel despachado (0 matrices FP32 en RAM)
-        paged_absorb_uk_f32(ws->q_c, layer->w_uk.page_ptrs, layer->w_uk.num_pages, layer->w_uk.scale, ws->q_c_absorbed, n_heads, qk_nope_head_dim, kv_lora_rank, S);
-
-        // 4.8. Atencion Causal Multi-Head Latente (descuantizacion unica por capa + 4 cabezas compartiendo KV)
-        int end_len = past_len + S;
-        const float* c_kv_layer = NULL;
-        if (kv->use_int8_kv) {
-            size_t layer_scale_base = (size_t)l * (size_t)kv->max_seq_len;
-            #pragma omp parallel for schedule(static) if (end_len >= 64)
-            for (int s = 0; s < end_len; ++s) {
-                size_t scale_idx = layer_scale_base + (size_t)s;
-                float sc = kv->c_kv_scales[scale_idx];
-                const int8_t* src = kv->c_kv_i8 + scale_idx * (size_t)kv_lora_rank;
-                float* dst = ws->c_kv_dequant + (size_t)s * (size_t)kv_lora_rank;
-                for (int c = 0; c < kv_lora_rank; ++c) {
-                    dst[c] = (float)src[c] * sc;
+            // RoPE sobre Q y K
+            #pragma omp parallel for schedule(static) if (S >= 16)
+            for (int t = 0; t < S; ++t) {
+                int pos = past_len + t;
+                for (int h = 0; h < n_heads; ++h) {
+                    float* q_h = ws->q_c + ((size_t)t * (size_t)n_heads + (size_t)h) * (size_t)head_dim;
+                    if (model->cfg.rope_interleaved) {
+                        apply_rope_c(q_h, head_dim, pos, model->rope_cos, model->rope_sin);
+                    } else {
+                        apply_rope_split_half_c(q_h, head_dim, pos, model->rope_cos, model->rope_sin);
+                    }
+                }
+                for (int kh = 0; kh < n_kv_heads; ++kh) {
+                    float* k_h = ws->gqa_k_tmp + ((size_t)t * (size_t)n_kv_heads + (size_t)kh) * (size_t)head_dim;
+                    if (model->cfg.rope_interleaved) {
+                        apply_rope_c(k_h, head_dim, pos, model->rope_cos, model->rope_sin);
+                    } else {
+                        apply_rope_split_half_c(k_h, head_dim, pos, model->rope_cos, model->rope_sin);
+                    }
                 }
             }
-            c_kv_layer = ws->c_kv_dequant;
-        } else {
-            c_kv_layer = kv->c_kv_fp32 + (size_t)l * (size_t)kv->max_seq_len * (size_t)kv_lora_rank;
-        }
-        const float* k_pe_layer = kv->k_pe + (size_t)l * (size_t)kv->max_seq_len * (size_t)qk_rope_head_dim;
 
-        int n_threads = 1;
-#ifdef _OPENMP
-        n_threads = omp_get_max_threads();
-        if (n_threads > ws->max_threads) n_threads = ws->max_threads;
-        if (n_threads < 1) n_threads = 1;
-#endif
-
-        if (S >= 2) {
-            #pragma omp parallel for schedule(guided) num_threads(n_threads)
+            // Almacenar K y V en KV Cache GQA
+            size_t kv_dim = (size_t)n_kv_heads * (size_t)head_dim;
+            #pragma omp parallel for schedule(static) if (S >= 16)
             for (int t = 0; t < S; ++t) {
-                int tid = 0;
-#ifdef _OPENMP
-                tid = omp_get_thread_num();
-#endif
-                float* sc_buf = ws->scores + (size_t)tid * 4 * (size_t)model->cfg.max_seq_len;
-                int total_len = past_len + t + 1;
-                const float* q_c_t = ws->q_c_absorbed + (size_t)t * (size_t)n_heads * (size_t)kv_lora_rank;
-                const float* q_pe_t = ws->q_pe + (size_t)t * (size_t)n_heads * (size_t)qk_rope_head_dim;
-                float* o_lat_t = ws->o_latent + (size_t)t * (size_t)n_heads * (size_t)kv_lora_rank;
+                trace_lm_kv_store_gqa(
+                    kv, l, past_len + t,
+                    ws->gqa_k_tmp + (size_t)t * kv_dim,
+                    ws->gqa_v_tmp + (size_t)t * kv_dim
+                );
+            }
 
-                for (int h = 0; h < n_heads; h += 4) {
+            // Descuantizacion unica por capa (o puntero directo si FP32)
+            int end_len = past_len + S;
+            const float* k_layer = NULL;
+            const float* v_layer = NULL;
+            if (kv->use_int8_kv) {
+                size_t layer_slot_base = (size_t)l * (size_t)kv->max_seq_len;
+                #pragma omp parallel for schedule(static) if (end_len >= 64)
+                for (int s = 0; s < end_len; ++s) {
+                    for (int kh = 0; kh < n_kv_heads; ++kh) {
+                        size_t scale_idx = (layer_slot_base + (size_t)s) * (size_t)n_kv_heads + (size_t)kh;
+                        size_t src_off = scale_idx * (size_t)head_dim;
+                        size_t dst_off = ((size_t)s * (size_t)n_kv_heads + (size_t)kh) * (size_t)head_dim;
+                        float ks = kv->gqa_k_scales[scale_idx];
+                        float vs = kv->gqa_v_scales[scale_idx];
+                        const int8_t* k_src = kv->gqa_k_i8 + src_off;
+                        const int8_t* v_src = kv->gqa_v_i8 + src_off;
+                        float* k_dst = ws->gqa_k_dequant + dst_off;
+                        float* v_dst = ws->gqa_v_dequant + dst_off;
+                        for (int d = 0; d < head_dim; ++d) {
+                            k_dst[d] = (float)k_src[d] * ks;
+                            v_dst[d] = (float)v_src[d] * vs;
+                        }
+                    }
+                }
+                k_layer = ws->gqa_k_dequant;
+                v_layer = ws->gqa_v_dequant;
+            } else {
+                size_t layer_off = (size_t)l * (size_t)kv->max_seq_len * kv_dim;
+                k_layer = kv->gqa_k_fp32 + layer_off;
+                v_layer = kv->gqa_v_fp32 + layer_off;
+            }
+
+            int group_size = n_heads / n_kv_heads;
+            if (S >= 2) {
+                #pragma omp parallel for schedule(guided) num_threads(n_threads)
+                for (int t = 0; t < S; ++t) {
+                    int tid = 0;
+#ifdef _OPENMP
+                    tid = omp_get_thread_num();
+#endif
+                    float* sc_buf = ws->scores + (size_t)tid * 4 * (size_t)model->cfg.max_seq_len;
+                    int total_len = past_len + t + 1;
+                    const float* q_t = ws->q_c + (size_t)t * (size_t)n_heads * (size_t)head_dim;
+                    float* o_t = ws->o_heads + (size_t)t * (size_t)n_heads * (size_t)head_dim;
+
+                    for (int kh = 0; kh < n_kv_heads; ++kh) {
+                        int q_base_idx = kh * group_size;
+                        for (int q_off = 0; q_off < group_size; q_off += 4) {
+                            int q_cnt = (q_off + 4 <= group_size) ? 4 : (group_size - q_off);
+                            trace_gqa_attn_group_f32(
+                                q_t, k_layer, v_layer, o_t, sc_buf,
+                                kh, q_base_idx + q_off, q_cnt, n_kv_heads, total_len, head_dim, attn_scale
+                            );
+                        }
+                    }
+                }
+            } else {
+                int total_len = past_len + 1;
+                #pragma omp parallel for schedule(static) num_threads(n_threads) if (n_kv_heads >= 2 && total_len >= 64)
+                for (int kh = 0; kh < n_kv_heads; ++kh) {
+                    int tid = 0;
+#ifdef _OPENMP
+                    tid = omp_get_thread_num();
+#endif
+                    float* sc_buf = ws->scores + (size_t)tid * 4 * (size_t)model->cfg.max_seq_len;
+                    int q_base_idx = kh * group_size;
+                    for (int q_off = 0; q_off < group_size; q_off += 4) {
+                        int q_cnt = (q_off + 4 <= group_size) ? 4 : (group_size - q_off);
+                        trace_gqa_attn_group_f32(
+                            ws->q_c, k_layer, v_layer, ws->o_heads, sc_buf,
+                            kh, q_base_idx + q_off, q_cnt, n_kv_heads, total_len, head_dim, attn_scale
+                        );
+                    }
+                }
+            }
+        } else {
+            // Ruta MLA (TRACE nativo)
+            // 4.2. Proyeccion KV latente: w_dkv
+            paged_linear_forward_act_int8(ws->h_norm, &layer->w_dkv, ws->c_kv_tmp, S, ws, eps);
+
+            // 4.3. Normalizacion de cuello de botella: kv_norm
+            #pragma omp parallel for schedule(static) if (S >= 16)
+            for (int t = 0; t < S; ++t) {
+                rms_norm(ws->c_kv_tmp + (size_t)t * (size_t)kv_lora_rank, layer->kv_norm_w, ws->c_kv_tmp + (size_t)t * (size_t)kv_lora_rank, kv_lora_rank, eps);
+            }
+
+            // 4.4. Proyeccion de clave rotacional: w_kr
+            paged_linear_forward_act_int8(ws->h_norm, &layer->w_kr, ws->k_pe_tmp, S, ws, eps);
+            #pragma omp parallel for schedule(static) if (S >= 16)
+            for (int t = 0; t < S; ++t) {
+                apply_rope_c(ws->k_pe_tmp + (size_t)t * (size_t)qk_rope_head_dim, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
+            }
+
+            // 4.5. Guardar c_kv y k_pe en el KV Cache para cada token nuevo
+            #pragma omp parallel for schedule(static) if (S >= 16)
+            for (int t = 0; t < S; ++t) {
+                trace_lm_kv_store(kv, l, past_len + t, ws->c_kv_tmp + (size_t)t * (size_t)kv_lora_rank, ws->k_pe_tmp + (size_t)t * (size_t)qk_rope_head_dim);
+            }
+
+            // 4.6. Proyecciones de consulta: w_q y w_qr
+            paged_linear_forward_act_int8(ws->h_norm, &layer->w_q, ws->q_c, S, ws, eps);
+            paged_linear_forward_act_int8(ws->h_norm, &layer->w_qr, ws->q_pe, S, ws, eps);
+
+            // Aplicar RoPE sobre q_pe
+            #pragma omp parallel for schedule(static) if (S >= 16)
+            for (int t = 0; t < S; ++t) {
+                for (int h = 0; h < n_heads; ++h) {
+                    float* q_pe_h = ws->q_pe + ((size_t)t * (size_t)n_heads + (size_t)h) * (size_t)qk_rope_head_dim;
+                    apply_rope_c(q_pe_h, qk_rope_head_dim, past_len + t, model->rope_cos, model->rope_sin);
+                }
+            }
+
+            // 4.7. Absorcion 1: W_uk^T q_c via kernel despachado (0 matrices FP32 en RAM)
+            paged_absorb_uk_f32(ws->q_c, layer->w_uk.page_ptrs, layer->w_uk.num_pages, layer->w_uk.scale, ws->q_c_absorbed, n_heads, qk_nope_head_dim, kv_lora_rank, S);
+
+            // 4.8. Atencion Causal Multi-Head Latente (descuantizacion unica por capa + 4 cabezas compartiendo KV)
+            int end_len = past_len + S;
+            const float* c_kv_layer = NULL;
+            if (kv->use_int8_kv) {
+                size_t layer_scale_base = (size_t)l * (size_t)kv->max_seq_len;
+                #pragma omp parallel for schedule(static) if (end_len >= 64)
+                for (int s = 0; s < end_len; ++s) {
+                    size_t scale_idx = layer_scale_base + (size_t)s;
+                    float sc = kv->c_kv_scales[scale_idx];
+                    const int8_t* src = kv->c_kv_i8 + scale_idx * (size_t)kv_lora_rank;
+                    float* dst = ws->c_kv_dequant + (size_t)s * (size_t)kv_lora_rank;
+                    for (int c = 0; c < kv_lora_rank; ++c) {
+                        dst[c] = (float)src[c] * sc;
+                    }
+                }
+                c_kv_layer = ws->c_kv_dequant;
+            } else {
+                c_kv_layer = kv->c_kv_fp32 + (size_t)l * (size_t)kv->max_seq_len * (size_t)kv_lora_rank;
+            }
+            const float* k_pe_layer = kv->k_pe + (size_t)l * (size_t)kv->max_seq_len * (size_t)qk_rope_head_dim;
+
+            if (S >= 2) {
+                #pragma omp parallel for schedule(guided) num_threads(n_threads)
+                for (int t = 0; t < S; ++t) {
+                    int tid = 0;
+#ifdef _OPENMP
+                    tid = omp_get_thread_num();
+#endif
+                    float* sc_buf = ws->scores + (size_t)tid * 4 * (size_t)model->cfg.max_seq_len;
+                    int total_len = past_len + t + 1;
+                    const float* q_c_t = ws->q_c_absorbed + (size_t)t * (size_t)n_heads * (size_t)kv_lora_rank;
+                    const float* q_pe_t = ws->q_pe + (size_t)t * (size_t)n_heads * (size_t)qk_rope_head_dim;
+                    float* o_lat_t = ws->o_latent + (size_t)t * (size_t)n_heads * (size_t)kv_lora_rank;
+
+                    for (int h = 0; h < n_heads; h += 4) {
+                        int h_cnt = (h + 4 <= n_heads) ? 4 : (n_heads - h);
+                        trace_mla_attn_group_f32(
+                            q_c_t, q_pe_t, c_kv_layer, k_pe_layer, o_lat_t,
+                            sc_buf, h, h_cnt, total_len, kv_lora_rank, qk_rope_head_dim, attn_scale
+                        );
+                    }
+                }
+            } else {
+                int total_len = past_len + 1;
+                int num_groups = (n_heads + 3) / 4;
+                #pragma omp parallel for schedule(static) num_threads(n_threads) if (num_groups >= 2 && total_len >= 64)
+                for (int g = 0; g < num_groups; ++g) {
+                    int tid = 0;
+#ifdef _OPENMP
+                    tid = omp_get_thread_num();
+#endif
+                    float* sc_buf = ws->scores + (size_t)tid * 4 * (size_t)model->cfg.max_seq_len;
+                    int h = g * 4;
                     int h_cnt = (h + 4 <= n_heads) ? 4 : (n_heads - h);
                     trace_mla_attn_group_f32(
-                        q_c_t, q_pe_t, c_kv_layer, k_pe_layer, o_lat_t,
+                        ws->q_c_absorbed, ws->q_pe, c_kv_layer, k_pe_layer, ws->o_latent,
                         sc_buf, h, h_cnt, total_len, kv_lora_rank, qk_rope_head_dim, attn_scale
                     );
                 }
             }
-        } else {
-            int total_len = past_len + 1;
-            int num_groups = (n_heads + 3) / 4;
-            #pragma omp parallel for schedule(static) num_threads(n_threads) if (num_groups >= 2 && total_len >= 64)
-            for (int g = 0; g < num_groups; ++g) {
-                int tid = 0;
-#ifdef _OPENMP
-                tid = omp_get_thread_num();
-#endif
-                float* sc_buf = ws->scores + (size_t)tid * 4 * (size_t)model->cfg.max_seq_len;
-                int h = g * 4;
-                int h_cnt = (h + 4 <= n_heads) ? 4 : (n_heads - h);
-                trace_mla_attn_group_f32(
-                    ws->q_c_absorbed, ws->q_pe, c_kv_layer, k_pe_layer, ws->o_latent,
-                    sc_buf, h, h_cnt, total_len, kv_lora_rank, qk_rope_head_dim, attn_scale
-                );
-            }
+
+            // 4.9. Absorcion 2: W_uv . o_latent via kernel despachado
+            paged_absorb_uv_f32(ws->o_latent, layer->w_uv.page_ptrs, layer->w_uv.num_pages, layer->w_uv.scale, ws->o_heads, n_heads, v_head_dim, kv_lora_rank, S);
         }
 
-        // 4.9. Absorcion 2: W_uv . o_latent via kernel despachado
-        paged_absorb_uv_f32(ws->o_latent, layer->w_uv.page_ptrs, layer->w_uv.num_pages, layer->w_uv.scale, ws->o_heads, n_heads, v_head_dim, kv_lora_rank, S);
-
-        // 4.10. Proyeccion de salida: w_out
+        // 4.10. Proyeccion de salida: w_out (con attn_sub_norm si sub_ln_w != NULL)
         paged_linear_forward_act_int8(ws->o_heads, &layer->w_out, ws->attn_out, S, ws, eps);
 
         // Residual de atencion: x = x + attn_out
@@ -357,20 +544,30 @@ int trace_lm_forward(
             ws->x[i] += ws->attn_out[i];
         }
 
-        // 4.11. FFN: RMSNorm -> ffn_up -> Squared-ReLU -> ffn_down
+        // 4.11. FFN: RMSNorm -> (gate/up + Squared-ReLU) -> ffn_down
         #pragma omp parallel for schedule(static) if (S >= 16)
         for (int t = 0; t < S; ++t) {
             rms_norm(ws->x + (size_t)t * (size_t)d_model, layer->ffn_norm_w, ws->h_norm + (size_t)t * (size_t)d_model, d_model, eps);
         }
-        paged_linear_forward_act_int8(ws->h_norm, &layer->ffn_up, ws->ffn_hidden, S, ws, eps);
 
-        // Activacion Squared-ReLU: relu(x)^2
         int total_ff = S * d_ff;
-        #pragma omp parallel for schedule(static) if (total_ff >= 4096)
-        for (int i = 0; i < total_ff; ++i) {
-            float val = ws->ffn_hidden[i];
-            float r = (val > 0.0f) ? val : 0.0f;
-            ws->ffn_hidden[i] = r * r;
+        if (model->cfg.use_gated_ffn) {
+            paged_linear_forward_act_int8(ws->h_norm, &layer->ffn_gate, ws->ffn_gate_buf, S, ws, eps);
+            paged_linear_forward_act_int8(ws->h_norm, &layer->ffn_up, ws->ffn_hidden, S, ws, eps);
+            #pragma omp parallel for schedule(static) if (total_ff >= 4096)
+            for (int i = 0; i < total_ff; ++i) {
+                float gv = ws->ffn_gate_buf[i];
+                float r = (gv > 0.0f) ? gv : 0.0f;
+                ws->ffn_hidden[i] = (r * r) * ws->ffn_hidden[i];
+            }
+        } else {
+            paged_linear_forward_act_int8(ws->h_norm, &layer->ffn_up, ws->ffn_hidden, S, ws, eps);
+            #pragma omp parallel for schedule(static) if (total_ff >= 4096)
+            for (int i = 0; i < total_ff; ++i) {
+                float val = ws->ffn_hidden[i];
+                float r = (val > 0.0f) ? val : 0.0f;
+                ws->ffn_hidden[i] = r * r;
+            }
         }
 
         paged_linear_forward_act_int8(ws->ffn_hidden, &layer->ffn_down, ws->ffn_out, S, ws, eps);
@@ -388,21 +585,25 @@ int trace_lm_forward(
         rms_norm(ws->x + (size_t)t * (size_t)d_model, model->final_norm_w, ws->x_norm + (size_t)t * (size_t)d_model, d_model, eps);
     }
 
-    // 6. Proyeccion de salida con tied embeddings
+    // 6. Proyeccion de salida (FP32 / FP16 / INT8)
     int vocab_size = model->cfg.vocab_size;
-    if (last_token_only) {
-        // Optimizado para CLI / generacion: computa unicamente el ultimo token (S - 1)
-        const float* x_last = ws->x_norm + (size_t)(S - 1) * (size_t)d_model;
-        #pragma omp parallel for schedule(static) if (vocab_size >= 256)
-        for (int v = 0; v < vocab_size; ++v) {
-            const float* emb_v = model->lm_head_w + (size_t)v * (size_t)d_model;
-            out_logits[v] = trace_dot_f32(x_last, emb_v, d_model);
-        }
-    } else {
-        // Escribe logits para todos los S tokens nuevos
-        for (int t = 0; t < S; ++t) {
-            const float* x_t = ws->x_norm + (size_t)t * (size_t)d_model;
-            float* logits_t = out_logits + (size_t)t * (size_t)vocab_size;
+    int t_start = last_token_only ? (S - 1) : 0;
+    for (int t = t_start; t < S; ++t) {
+        const float* x_t = ws->x_norm + (size_t)t * (size_t)d_model;
+        float* logits_t = last_token_only ? out_logits : (out_logits + (size_t)t * (size_t)vocab_size);
+        if (model->lm_head_dtype == TRACE_EMB_FP16) {
+            #pragma omp parallel for schedule(static) if (vocab_size >= 256)
+            for (int v = 0; v < vocab_size; ++v) {
+                const uint16_t* emb_v = model->lm_head_f16 + (size_t)v * (size_t)d_model;
+                logits_t[v] = trace_dot_f32_f16(x_t, emb_v, d_model);
+            }
+        } else if (model->lm_head_dtype == TRACE_EMB_INT8) {
+            #pragma omp parallel for schedule(static) if (vocab_size >= 256)
+            for (int v = 0; v < vocab_size; ++v) {
+                const int8_t* emb_v = model->lm_head_i8 + (size_t)v * (size_t)d_model;
+                logits_t[v] = trace_dot_f32_i8(x_t, emb_v, model->lm_head_scales[v], d_model);
+            }
+        } else {
             #pragma omp parallel for schedule(static) if (vocab_size >= 256)
             for (int v = 0; v < vocab_size; ++v) {
                 const float* emb_v = model->lm_head_w + (size_t)v * (size_t)d_model;

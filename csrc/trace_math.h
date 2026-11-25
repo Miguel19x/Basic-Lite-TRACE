@@ -103,4 +103,34 @@ static inline float avx2_dot_product_f32(const float* a, const float* b, int n) 
 
 #endif
 
+static inline float trace_f16_to_f32(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+    uint32_t exp = (uint32_t)(h & 0x7C00u) >> 10;
+    uint32_t mant = (uint32_t)(h & 0x03FFu);
+    uint32_t bits;
+    if (exp == 0) {
+        if (mant == 0) {
+            bits = sign;
+        } else {
+            exp = 127 - 14;
+            while ((mant & 0x0400u) == 0) {
+                mant <<= 1;
+                exp--;
+            }
+            mant &= 0x03FFu;
+            bits = sign | (exp << 23) | (mant << 13);
+        }
+    } else if (exp == 31) {
+        bits = sign | 0x7F800000u | (mant << 13);
+    } else {
+        bits = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+    }
+    union {
+        uint32_t u;
+        float f;
+    } conv;
+    conv.u = bits;
+    return conv.f;
+}
+
 #endif // TRACE_MATH_H

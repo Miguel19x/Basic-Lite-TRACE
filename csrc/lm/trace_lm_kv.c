@@ -24,11 +24,38 @@ TraceLMKVCache* trace_lm_kv_create(const TraceLMConfig* cfg, int max_seq_len, in
     kv->n_layers = cfg->n_layers;
     kv->kv_lora_rank = cfg->kv_lora_rank;
     kv->qk_rope_head_dim = cfg->qk_rope_head_dim;
+    kv->attn_type = cfg->attn_type;
+    kv->n_kv_heads = cfg->n_kv_heads;
+    kv->head_dim = cfg->head_dim;
 
-    kv->cached_tokens = (int*)malloc(sizeof(int) * max_seq_len);
+    kv->cached_tokens = (int*)malloc(sizeof(int) * (size_t)max_seq_len);
     if (!kv->cached_tokens) {
         free(kv);
         return NULL;
+    }
+
+    if (cfg->attn_type == TRACE_ATTN_GQA) {
+        size_t kv_dim = (size_t)cfg->n_kv_heads * (size_t)cfg->head_dim;
+        size_t total_elems = (size_t)cfg->n_layers * (size_t)max_seq_len * kv_dim;
+        if (use_int8_kv) {
+            size_t total_scales = (size_t)cfg->n_layers * (size_t)max_seq_len * (size_t)cfg->n_kv_heads;
+            kv->gqa_k_i8 = (int8_t*)malloc(sizeof(int8_t) * total_elems);
+            kv->gqa_k_scales = (float*)malloc(sizeof(float) * total_scales);
+            kv->gqa_v_i8 = (int8_t*)malloc(sizeof(int8_t) * total_elems);
+            kv->gqa_v_scales = (float*)malloc(sizeof(float) * total_scales);
+            if (!kv->gqa_k_i8 || !kv->gqa_k_scales || !kv->gqa_v_i8 || !kv->gqa_v_scales) {
+                trace_lm_kv_free(kv);
+                return NULL;
+            }
+        } else {
+            kv->gqa_k_fp32 = (float*)malloc(sizeof(float) * total_elems);
+            kv->gqa_v_fp32 = (float*)malloc(sizeof(float) * total_elems);
+            if (!kv->gqa_k_fp32 || !kv->gqa_v_fp32) {
+                trace_lm_kv_free(kv);
+                return NULL;
+            }
+        }
+        return kv;
     }
 
     size_t k_pe_total = (size_t)cfg->n_layers * (size_t)max_seq_len * (size_t)cfg->qk_rope_head_dim;
@@ -70,6 +97,12 @@ void trace_lm_kv_free(TraceLMKVCache* kv) {
     if (kv->c_kv_i8) free(kv->c_kv_i8);
     if (kv->c_kv_scales) free(kv->c_kv_scales);
     if (kv->c_kv_fp32) free(kv->c_kv_fp32);
+    if (kv->gqa_k_i8) free(kv->gqa_k_i8);
+    if (kv->gqa_k_scales) free(kv->gqa_k_scales);
+    if (kv->gqa_v_i8) free(kv->gqa_v_i8);
+    if (kv->gqa_v_scales) free(kv->gqa_v_scales);
+    if (kv->gqa_k_fp32) free(kv->gqa_k_fp32);
+    if (kv->gqa_v_fp32) free(kv->gqa_v_fp32);
     free(kv);
 }
 
@@ -186,4 +219,60 @@ const float* trace_lm_kv_get_k_pe(
 
 int trace_lm_kv_get_last_common_prefix(const TraceLMKVCache* kv) {
     return kv ? kv->last_common_prefix : 0;
+}
+
+static inline void quantize_vec_int8_symmetric(
+    const float* src,
+    int8_t* dst,
+    float* out_scale,
+    int n
+) {
+    float amax = 1e-6f;
+    for (int i = 0; i < n; ++i) {
+        float v = fabsf(src[i]);
+        if (v > amax) amax = v;
+    }
+    float scale = amax / 127.0f;
+    float scale_inv = 127.0f / amax;
+    *out_scale = scale;
+    for (int i = 0; i < n; ++i) {
+        float q = nearbyintf(src[i] * scale_inv);
+        if (!isfinite(q)) q = 0.0f;
+        else if (q > 127.0f) q = 127.0f;
+        else if (q < -127.0f) q = -127.0f;
+        dst[i] = (int8_t)q;
+    }
+}
+
+void trace_lm_kv_store_gqa(
+    TraceLMKVCache* kv,
+    int layer_idx,
+    int pos,
+    const float* k_token,
+    const float* v_token
+) {
+    if (!kv || !k_token || !v_token ||
+        kv->attn_type != TRACE_ATTN_GQA ||
+        layer_idx < 0 || layer_idx >= kv->n_layers ||
+        pos < 0 || pos >= kv->max_seq_len) {
+        return;
+    }
+
+    size_t kv_dim = (size_t)kv->n_kv_heads * (size_t)kv->head_dim;
+    size_t base_slot = (size_t)layer_idx * (size_t)kv->max_seq_len + (size_t)pos;
+
+    if (kv->use_int8_kv) {
+        for (int kh = 0; kh < kv->n_kv_heads; ++kh) {
+            size_t scale_idx = base_slot * (size_t)kv->n_kv_heads + (size_t)kh;
+            size_t elem_off = scale_idx * (size_t)kv->head_dim;
+            const float* k_src = k_token + (size_t)kh * (size_t)kv->head_dim;
+            const float* v_src = v_token + (size_t)kh * (size_t)kv->head_dim;
+            quantize_vec_int8_symmetric(k_src, kv->gqa_k_i8 + elem_off, &kv->gqa_k_scales[scale_idx], kv->head_dim);
+            quantize_vec_int8_symmetric(v_src, kv->gqa_v_i8 + elem_off, &kv->gqa_v_scales[scale_idx], kv->head_dim);
+        }
+    } else {
+        size_t elem_off = base_slot * kv_dim;
+        memcpy(kv->gqa_k_fp32 + elem_off, k_token, sizeof(float) * kv_dim);
+        memcpy(kv->gqa_v_fp32 + elem_off, v_token, sizeof(float) * kv_dim);
+    }
 }

@@ -104,6 +104,34 @@ typedef void (*trace_mla_attn_group_f32_fn)(
     float attn_scale
 );
 
+typedef float (*trace_dot_f32_f16_fn)(
+    const float* x,
+    const uint16_t* w_f16,
+    int n
+);
+
+typedef float (*trace_dot_f32_i8_fn)(
+    const float* x,
+    const int8_t* w_i8,
+    float scale,
+    int n
+);
+
+typedef void (*trace_gqa_attn_group_f32_fn)(
+    const float* q_base,
+    const float* k_layer,
+    const float* v_layer,
+    float* o_heads_base,
+    float* scores_scratch,
+    int kv_h,
+    int q_start,
+    int q_count,
+    int n_kv_heads,
+    int total_len,
+    int head_dim,
+    float attn_scale
+);
+
 // Funciones públicas exportadas con despacho dinámico transparente
 void paged_direct_matmul_fast_c(
     const int8_t* x,
@@ -189,6 +217,34 @@ void trace_mla_attn_group_f32(
     int total_len,
     int kv_lora_rank,
     int qk_rope_head_dim,
+    float attn_scale
+);
+
+float trace_dot_f32_f16(
+    const float* x,
+    const uint16_t* w_f16,
+    int n
+);
+
+float trace_dot_f32_i8(
+    const float* x,
+    const int8_t* w_i8,
+    float scale,
+    int n
+);
+
+void trace_gqa_attn_group_f32(
+    const float* q_base,
+    const float* k_layer,
+    const float* v_layer,
+    float* o_heads_base,
+    float* scores_scratch,
+    int kv_h,
+    int q_start,
+    int q_count,
+    int n_kv_heads,
+    int total_len,
+    int head_dim,
     float attn_scale
 );
 

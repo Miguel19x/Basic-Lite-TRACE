@@ -19,6 +19,13 @@ extern "C" {
 // Declaración opaca de KV Cache
 struct TraceLMKVCache;
 
+#define TRACE_ATTN_MLA 0
+#define TRACE_ATTN_GQA 1
+
+#define TRACE_EMB_FP32 0
+#define TRACE_EMB_FP16 1
+#define TRACE_EMB_INT8 2
+
 typedef struct {
     int vocab_size;
     int d_model;
@@ -27,15 +34,22 @@ typedef struct {
     int d_ff;
     int max_seq_len;
     float eps;
-    int kv_lora_rank;      // d_c
-    int qk_nope_head_dim;  // d_h
-    int qk_rope_head_dim;  // d_pe
-    int v_head_dim;        // d_v
+    int kv_lora_rank;      // d_c (MLA)
+    int qk_nope_head_dim;  // d_h (MLA)
+    int qk_rope_head_dim;  // d_pe (MLA) o head_dim (GQA)
+    int v_head_dim;        // d_v (MLA) o head_dim (GQA)
     int tie_word_embeddings;
     int pad_token_id;
     int mask_token_id;
     int bos_token_id;
     int eos_token_id;
+    // Extensiones GQA / BitNet-2B-4T
+    int attn_type;         // 0 = MLA, 1 = GQA
+    int n_kv_heads;        // Cabezas KV en GQA
+    int head_dim;          // Dimension por cabeza en GQA
+    float rope_theta;      // Base RoPE (10000.0 por defecto)
+    int rope_interleaved;  // 1 = intercalado, 0 = split-half
+    int use_gated_ffn;     // 0 = ReLU^2(up), 1 = ReLU^2(gate) * up
 } TraceLMConfig;
 
 typedef struct {
@@ -57,24 +71,36 @@ typedef struct {
     TraceLMPagedLinear w_kr;
     TraceLMPagedLinear w_q;
     TraceLMPagedLinear w_qr;
+    TraceLMPagedLinear w_k;    // GQA
+    TraceLMPagedLinear w_v;    // GQA
     TraceLMPagedLinear w_out;
+    TraceLMPagedLinear ffn_gate; // Gated FFN (BitNet-2B-4T)
     TraceLMPagedLinear ffn_up;
     TraceLMPagedLinear ffn_down;
 } TraceLMLayer;
 
 typedef struct {
     TraceLMConfig cfg;
-    float* tok_emb;        // [vocab_size * d_model]
-    float* lm_head_w;      // [vocab_size * d_model] (alias de tok_emb si tie_word_embeddings == 1)
+    float* tok_emb;        // [vocab_size * d_model] si tok_emb_dtype == TRACE_EMB_FP32
+    float* lm_head_w;      // [vocab_size * d_model] si lm_head_dtype == TRACE_EMB_FP32
     float* final_norm_w;   // [d_model]
     TraceLMLayer* layers;  // [n_layers]
-    float* rope_cos;       // [max_seq_len * qk_rope_head_dim]
-    float* rope_sin;       // [max_seq_len * qk_rope_head_dim]
+    float* rope_cos;       // [max_seq_len * qk_rope_head_dim] o [max_seq_len * (head_dim/2)]
+    float* rope_sin;       // [max_seq_len * qk_rope_head_dim] o [max_seq_len * (head_dim/2)]
     void* page_pool;       // Buffer alineado a 4096 bytes cargado en 1 pread
     size_t page_pool_bytes;
     int pread_calls;       // Syscalls pread (cabecera + pool contiguo = 2)
     int used_odirect;      // 1: O_DIRECT activo, 0: lectura estandar
     int fd;
+    // Embeddings compactos (FP16 / INT8 por fila)
+    int tok_emb_dtype;
+    uint16_t* tok_emb_f16;
+    int8_t* tok_emb_i8;
+    float* tok_emb_scales;
+    int lm_head_dtype;
+    uint16_t* lm_head_f16;
+    int8_t* lm_head_i8;
+    float* lm_head_scales;
 } TraceLMModel;
 
 typedef struct {
@@ -101,8 +127,14 @@ typedef struct {
     float* k_pe_tmp;       // [max_batch_seq * qk_rope_head_dim]
     float* attn_out;       // [max_batch_seq * d_model]
     float* ffn_out;        // [max_batch_seq * d_model]
-    float* c_kv_dequant;   // [max_seq_len * kv_lora_rank] (descuantizacion unica por capa)
+    float* c_kv_dequant;   // [max_seq_len * kv_lora_rank] (descuantizacion unica por capa MLA)
     int max_threads;       // Hilos maximos reservados en ws->scores
+    // Buffers opcionales GQA / Gated FFN (NULL si MLA sin compuerta)
+    float* ffn_gate_buf;   // [max_batch_seq * d_ff]
+    float* gqa_k_tmp;      // [max_batch_seq * n_kv_heads * head_dim]
+    float* gqa_v_tmp;      // [max_batch_seq * n_kv_heads * head_dim]
+    float* gqa_k_dequant;  // [max_seq_len * n_kv_heads * head_dim]
+    float* gqa_v_dequant;  // [max_seq_len * n_kv_heads * head_dim]
 } TraceLMWorkspace;
 
 // Carga y destrucción de modelo
@@ -147,6 +179,8 @@ int trace_lm_get_pread_calls(const TraceLMModel* model);
 int trace_lm_get_used_odirect(const TraceLMModel* model);
 const TraceLMConfig* trace_lm_get_config(const TraceLMModel* model);
 int trace_lm_get_vocab_size(const TraceLMModel* model);
+int trace_lm_get_tok_emb_dtype(const TraceLMModel* model);
+int trace_lm_get_attn_type(const TraceLMModel* model);
 
 #ifdef __cplusplus
 }
