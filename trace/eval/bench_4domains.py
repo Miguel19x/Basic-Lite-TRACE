@@ -135,12 +135,15 @@ def _normalize_text(text: str) -> str:
 def grade_answer(response_text: str, expected_answer: str) -> bool:
     """
     Evalúa coincidencia exacta del valor semántico esperado sin inflar por plantilla.
+    Si existe etiqueta `<answer>...</answer>` (Fase 5), evalúa únicamente su contenido.
     Exige que el valor esperado aparezca como token/número delimitado (no subcadena accidental).
     """
     exp = _normalize_text(expected_answer)
     if not exp:
         return False
-    norm_resp = _normalize_text(response_text)
+    m_ans = re.search(r"<answer>(.*?)</answer>", response_text, re.DOTALL)
+    candidate = m_ans.group(1) if m_ans is not None else response_text
+    norm_resp = _normalize_text(candidate)
     if norm_resp == exp:
         return True
     pattern = rf"(?<![0-9a-zA-Z_]){re.escape(exp)}(?![0-9a-zA-Z_])"
@@ -315,6 +318,9 @@ def build_default_tasks() -> list[BenchmarkTask]:
 
 def _extract_json_object(raw_text: str) -> dict[str, Any] | None:
     stripped = raw_text.strip()
+    m_tool = re.search(r"<tool_call>(.*?)</tool_call>", stripped, re.DOTALL)
+    if m_tool is not None:
+        stripped = m_tool.group(1).strip()
     try:
         parsed = json.loads(stripped)
         if isinstance(parsed, dict):
