@@ -289,4 +289,34 @@ def load_trace_tokenizer_lib() -> ctypes.CDLL:
         ctypes.c_int,
     ]
     lib.trace_tokenizer_format_chat_llama3.restype = ctypes.c_int
+
+    lib.trace_json_grammar_sizeof.argtypes = []
+    lib.trace_json_grammar_sizeof.restype = ctypes.c_size_t
+
+    lib.trace_json_grammar_init.argtypes = [ctypes.c_void_p]
+    lib.trace_json_grammar_init.restype = None
+
+    lib.trace_json_grammar_is_done.argtypes = [ctypes.c_void_p]
+    lib.trace_json_grammar_is_done.restype = ctypes.c_int
+
+    lib.trace_json_grammar_advance_bytes.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_int,
+    ]
+    lib.trace_json_grammar_advance_bytes.restype = ctypes.c_int
+
+    lib.trace_json_grammar_accept_token.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int32,
+    ]
+    lib.trace_json_grammar_accept_token.restype = ctypes.c_int
+
+    lib.trace_json_grammar_mask_logits.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_float),
+    ]
+    lib.trace_json_grammar_mask_logits.restype = ctypes.c_int
     return lib

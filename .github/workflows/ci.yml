@@ -75,6 +75,7 @@ jobs:
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_prefill_parity.py
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_gqa_compact_emb.py
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_bitnet_importer.py
+          LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_grammar_mask.py
 
       - name: Build and Test C Engine under ASan/UBSan (Scalar-only, -UTRACE_ENABLE_AVX2)
         run: |
@@ -89,3 +90,4 @@ jobs:
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_prefill_parity.py
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_gqa_compact_emb.py
           LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_bitnet_importer.py
+          LD_PRELOAD="${ASAN_LIB}" ASAN_OPTIONS="detect_leaks=0:halt_on_error=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" PYTHONPATH=. python tests/test_grammar_mask.py

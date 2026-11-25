@@ -26,8 +26,8 @@ LM_BIN = trace_lm
 INFER_SRCS = csrc/trace_loader.c csrc/trace_causal.c
 INFER_OBJS = csrc/trace_loader.o csrc/trace_causal.o
 HEADERS = csrc/trace_infer.h csrc/trace_math.h csrc/paged_unpack.h csrc/paged_dispatch.h
-TOKENIZER_SRC = csrc/lm/trace_tokenizer.c
-TOKENIZER_HDR = csrc/lm/trace_tokenizer.h
+TOKENIZER_SRC = csrc/lm/trace_tokenizer.c csrc/lm/trace_grammar.c
+TOKENIZER_HDR = csrc/lm/trace_tokenizer.h csrc/lm/trace_grammar.h
 LM_SRCS = csrc/lm/trace_lm_loader.c csrc/lm/trace_lm_kv.c csrc/lm/trace_lm_infer.c
 LM_OBJS = csrc/lm/trace_lm_loader.o csrc/lm/trace_lm_kv.o csrc/lm/trace_lm_infer.o
 LM_HDRS = csrc/lm/trace_lm.h csrc/lm/trace_lm_kv.h $(HEADERS)
@@ -79,7 +79,7 @@ $(RUNNER_BIN): $(INFER_SRCS) $(DISPATCH_OBJS) $(HEADERS)
 	$(CC) $(EXE_CFLAGS) -DTRACE_INFER_MAIN -o $@ $(INFER_SRCS) $(DISPATCH_OBJS) -lm
 
 $(TOKENIZER_LIB): $(TOKENIZER_SRC) $(TOKENIZER_HDR)
-	$(CC) $(PIC_CFLAGS) -shared -o $@ $(TOKENIZER_SRC)
+	$(CC) $(PIC_CFLAGS) -shared -o $@ $(TOKENIZER_SRC) -lm
 
 $(LM_LIB): $(LM_OBJS) $(DISPATCH_OBJS)
 	$(CC) $(PIC_CFLAGS) -shared -o $@ $(LM_OBJS) $(DISPATCH_OBJS) -lm
