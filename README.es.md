@@ -94,29 +94,43 @@ python train.py --steps 1000 --batch_size 32 --warmup_ratio 0.40 --device cpu
 ```mermaid
 flowchart TD
     subgraph InputStage ["1. Entrada y Codificación Posicional"]
-        RawBytes["Bytes ASCII / BPE Compacto"] --> BytePatch["Byte Patching / BPE (Dígitos 1:1)"]
-        RawBytes --> AbacusLayer["Abacus Positional Embedding (Rangos decimales invertidos: U=0, D=1, C=2)"]
-        BytePatch & AbacusLayer --> CombinedEmbed["Representación de Entrada Enriquecida"]
+        RawBytes["Texto / Flujo de Entrada"]:::input --> BytePatch["Bytes ASCII (260, F. 1–2) / BPE Compacto (4K–8K, F. 3, Dígitos 1:1)"]:::input
+        RawBytes --> AbacusLayer["Abacus Positional Embedding (F. 1–2: U=0, D=1, C=2)"]:::input
+        BytePatch & AbacusLayer --> CombinedEmbed["Representaciones de Tokens y Posición"]:::input
     end
 
-    subgraph CoreTernary ["2. Tronco Recurrente Residente (W1.58A8)"]
-        CombinedEmbed --> SharedCore["Núcleo Ternario Compartido (BitLinear W1.58A8)"]
-        SharedCore --> MLA["Multi-Head Latent Attention (Compresión KV 4x–15.75x)"]
-        SharedCore --> PagedMoE["Memory-Aware Paged MoE: S(e) = U(e) - λ C_lectura - μ C_cómputo"]
+    subgraph CoreTernary ["2. Tronco Ternario Residente (W1.58A8 — Kernels C AVX2/FMA)"]
+        CombinedEmbed --> SharedCore["Núcleo BitLinear W1.58A8 (0 Pesos FP32 en RAM)"]:::core
+        SharedCore --> MLA["Fase 3: MLA Ternaria (KV 4x–15.75x) + FFN Squared-ReLU"]:::core
+        SharedCore --> PagedMoE["Fases 1–2: GQA Ternaria (4:2) + MoE Residente (4 Expertos + Compartido)"]:::core
     end
 
-    subgraph TwoStageField ["3. Campo Causal Desacoplado en 2 Etapas (Zero Exposure Bias)"]
-        PagedMoE --> Stage1["ETAPA 1: Predicción de Subtotales (pw, pms)"]
-        Stage1 --> CausalAnchor["Anclaje Causal con Stop-Gradient (detach)"]
-        CausalAnchor --> Stage2["ETAPA 2: Predicción de Totales Condicionados (watt, ms)"]
-        Stage2 --> OutputBytes["Salida de Ancho Fijo (100% Validez Sintáctica)"]
+    subgraph TwoStageField ["3. Cabezales de Ejecución y Contratos de Salida"]
+        PagedMoE --> Stage1["F. 1–2 ETAPA 1: Subtotales (pw, pms)"]:::causal
+        Stage1 --> CausalAnchor["Anclaje Causal con Stop-Gradient (detach)"]:::gate
+        CausalAnchor --> Stage2["F. 1–2 ETAPA 2: Totales Condicionados (watt, ms)"]:::causal
+        Stage2 --> OutputBytes["Salida de Ancho Fijo (watt: 000 / ms: 000)"]:::causal
+        MLA --> LMHead["Fase 3: Cabezal LM Tied Embeddings (trace_lm, 214–237 tok/s)"]:::lm
     end
 
     subgraph MemoryHierarchy ["4. Administradores Físicos de Recursos"]
-        PagedBitCOS[("Paged BitCOS v1/v1.1 (Páginas 4 KB en NVMe)")] <--> LRUCache["Caché LRU en RAM (Slots Residentes)"]
-        LRUCache <--> PagedMoE
-        L1RAM["Nivel 1: RAM Activa (MLA)"] <--> L2Latent["Nivel 2: Latente Comprimido"] <--> L3SQLite[("Nivel 3: Archivo SQLite en Disco")]
+        PagedBitCOS[("Paged BitCOS v1/v1.1 (Páginas 4 KB en NVMe)")]:::storage <--> PagePool["Pool Contiguo de Páginas en RAM (O_DIRECT + pread)"]:::runtime
+        PagePool <--> PagedMoE
+        L1RAM["Nivel 1: RAM Activa (KV INT8 / FP32)"]:::runtime <--> L2Latent["Nivel 2: Latentes Comprimidos"]:::runtime <--> L3SQLite[("Nivel 3: SQLite FTS5 en Disco")]:::storage
     end
+
+    classDef input fill:#0c4a6e,stroke:#38bdf8,stroke-width:2px,color:#f0f9ff
+    classDef core fill:#3b0764,stroke:#a78bfa,stroke-width:2px,color:#f5f3ff
+    classDef causal fill:#064e3b,stroke:#34d399,stroke-width:2px,color:#ecfdf5
+    classDef gate fill:#78350f,stroke:#fbbf24,stroke-width:2px,color:#fef3c7
+    classDef lm fill:#881337,stroke:#fb7185,stroke-width:2px,color:#ffe4e6
+    classDef runtime fill:#1e293b,stroke:#94a3b8,stroke-width:2px,color:#f1f5f9
+    classDef storage fill:#7c2d12,stroke:#fb923c,stroke-width:2px,color:#ffedd5
+
+    style InputStage fill:#082f49,stroke:#38bdf8,stroke-width:1.5px,color:#e0f2fe
+    style CoreTernary fill:#2e1065,stroke:#a78bfa,stroke-width:1.5px,color:#ede9fe
+    style TwoStageField fill:#022c22,stroke:#34d399,stroke-width:1.5px,color:#d1fae5
+    style MemoryHierarchy fill:#431407,stroke:#fb923c,stroke-width:1.5px,color:#ffedd5
 ```
 
 ### Pilares y Cinco Ejes Fundamentales

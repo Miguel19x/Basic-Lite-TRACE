@@ -94,29 +94,43 @@ python train.py --steps 1000 --batch_size 32 --warmup_ratio 0.40 --device cpu
 ```mermaid
 flowchart TD
     subgraph InputStage ["1. Input & Positional Encoding"]
-        RawBytes["ASCII Bytes / Compact BPE"] --> BytePatch["Hierarchical Byte Patching / BPE (1:1 Digits)"]
-        RawBytes --> AbacusLayer["Abacus Positional Embedding (Inverted Decimal Ranks: U=0, D=1, C=2)"]
-        BytePatch & AbacusLayer --> CombinedEmbed["Enriched Input Representation"]
+        RawBytes["Raw Text / Input Stream"]:::input --> BytePatch["ASCII Bytes (260, Ph. 1–2) / Compact BPE (4K–8K, Ph. 3, 1:1 Digits)"]:::input
+        RawBytes --> AbacusLayer["Abacus Positional Embedding (Ph. 1–2: U=0, D=1, C=2)"]:::input
+        BytePatch & AbacusLayer --> CombinedEmbed["Token & Positional Representations"]:::input
     end
 
-    subgraph CoreTernary ["2. Resident Ternary Core (W1.58A8)"]
-        CombinedEmbed --> SharedCore["Shared Ternary Core (BitLinear W1.58A8)"]
-        SharedCore --> MLA["Multi-Head Latent Attention (4x–15.75x KV Compression)"]
-        SharedCore --> PagedMoE["I/O-Aware Paged MoE: S(e) = U(e) - λ C_read - μ C_compute"]
+    subgraph CoreTernary ["2. Resident Ternary Core (W1.58A8 — AVX2/FMA C Kernels)"]
+        CombinedEmbed --> SharedCore["BitLinear W1.58A8 Core (0 FP32 Weights in RAM)"]:::core
+        SharedCore --> MLA["Phase 3: Ternary MLA (4x–15.75x KV) + Squared-ReLU FFN"]:::core
+        SharedCore --> PagedMoE["Phases 1–2: Ternary GQA (4:2) + Resident MoE (4 Experts + Shared)"]:::core
     end
 
-    subgraph TwoStageField ["3. Two-Stage Decoupled Causal Field (Zero Exposure Bias)"]
-        PagedMoE --> Stage1["STAGE 1: Subtotal Prediction (pw, pms)"]
-        Stage1 --> CausalAnchor["Causal Anchor with Stop-Gradient (detach)"]
-        CausalAnchor --> Stage2["STAGE 2: Conditioned Final Totals (watt, ms)"]
-        Stage2 --> OutputBytes["Fixed-Width Output (100% Syntactic Validity)"]
+    subgraph TwoStageField ["3. Execution Heads & Output Contracts"]
+        PagedMoE --> Stage1["Ph. 1–2 STAGE 1: Subtotals (pw, pms)"]:::causal
+        Stage1 --> CausalAnchor["Causal Anchor with Stop-Gradient (detach)"]:::gate
+        CausalAnchor --> Stage2["Ph. 1–2 STAGE 2: Conditioned Totals (watt, ms)"]:::causal
+        Stage2 --> OutputBytes["Fixed-Width Output (watt: 000 / ms: 000)"]:::causal
+        MLA --> LMHead["Phase 3: Tied Embeddings LM Head (trace_lm, 214–237 tok/s)"]:::lm
     end
 
     subgraph MemoryHierarchy ["4. Physical Resource Managers"]
-        PagedBitCOS[("Paged BitCOS v1/v1.1 (4 KB Pages on NVMe)")] <--> LRUCache["RAM LRU Cache (Resident Slots)"]
-        LRUCache <--> PagedMoE
-        L1RAM["Tier 1: Active RAM (MLA)"] <--> L2Latent["Tier 2: Compressed Latents"] <--> L3SQLite[("Tier 3: Persistent SQLite on Disk")]
+        PagedBitCOS[("Paged BitCOS v1/v1.1 (4 KB Pages on NVMe)")]:::storage <--> PagePool["Contiguous RAM Page Pool (O_DIRECT + pread)"]:::runtime
+        PagePool <--> PagedMoE
+        L1RAM["Tier 1: Active RAM (INT8 / FP32 KV)"]:::runtime <--> L2Latent["Tier 2: Compressed Latents"]:::runtime <--> L3SQLite[("Tier 3: SQLite FTS5 on Disk")]:::storage
     end
+
+    classDef input fill:#0c4a6e,stroke:#38bdf8,stroke-width:2px,color:#f0f9ff
+    classDef core fill:#3b0764,stroke:#a78bfa,stroke-width:2px,color:#f5f3ff
+    classDef causal fill:#064e3b,stroke:#34d399,stroke-width:2px,color:#ecfdf5
+    classDef gate fill:#78350f,stroke:#fbbf24,stroke-width:2px,color:#fef3c7
+    classDef lm fill:#881337,stroke:#fb7185,stroke-width:2px,color:#ffe4e6
+    classDef runtime fill:#1e293b,stroke:#94a3b8,stroke-width:2px,color:#f1f5f9
+    classDef storage fill:#7c2d12,stroke:#fb923c,stroke-width:2px,color:#ffedd5
+
+    style InputStage fill:#082f49,stroke:#38bdf8,stroke-width:1.5px,color:#e0f2fe
+    style CoreTernary fill:#2e1065,stroke:#a78bfa,stroke-width:1.5px,color:#ede9fe
+    style TwoStageField fill:#022c22,stroke:#34d399,stroke-width:1.5px,color:#d1fae5
+    style MemoryHierarchy fill:#431407,stroke:#fb923c,stroke-width:1.5px,color:#ffedd5
 ```
 
 ### Core Pillars & Five Axes
