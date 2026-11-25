@@ -92,6 +92,7 @@ python train.py --steps 1000 --batch_size 32 --warmup_ratio 0.40 --device cpu
 ## 3. Esquema de Arquitectura y Cinco Ejes Canónicos
 
 ```mermaid
+%%{init: {'flowchart': {'subGraphTitleMargin': {'top': 10, 'bottom': 14}}}}%%
 flowchart TD
     subgraph InputStage ["1. Entrada y Codificación Posicional"]
         direction TB
@@ -105,25 +106,13 @@ flowchart TD
         AbacusLayer --> CombinedEmbed
     end
 
-    subgraph MemoryHierarchy ["4. Administradores Físicos de Recursos"]
-        direction TB
-        PagedBitCOS[("Paged BitCOS v1.1 (4 KB NVMe)")]:::storage
-        PagePool["Pool RAM Contiguo (O_DIRECT + pread)"]:::runtime
-        L1RAM["L1: RAM Activa (KV INT8 / FP32)"]:::runtime
-        L2Latent["L2: Latentes Comprimidos"]:::runtime
-        L3SQLite[("L3: SQLite FTS5 Disco")]:::storage
-        PagedBitCOS <--> PagePool
-        L1RAM <--> L2Latent
-        L2Latent <--> L3SQLite
-    end
-
     subgraph CoreTernary ["2. Tronco Ternario Residente (W1.58A8 — AVX2/FMA)"]
         direction TB
         SharedCore["Núcleo BitLinear W1.58A8 (0 Pesos FP32)"]:::core
-        MLA["Fase 3: MLA Ternaria (KV 4x–15.75x) + FFN"]:::core
         PagedMoE["Fases 1–2: GQA Ternaria (4:2) + MoE Residente"]:::core
-        SharedCore --> MLA
+        MLA["Fase 3: MLA Ternaria (KV 4x–15.75x) + FFN"]:::core
         SharedCore --> PagedMoE
+        SharedCore --> MLA
     end
 
     subgraph TwoStageField ["3. Cabezales de Ejecución y Salida"]
@@ -138,10 +127,23 @@ flowchart TD
         Stage2 --> OutputBytes
     end
 
+    subgraph MemoryHierarchy ["4. Administradores Físicos de Recursos"]
+        direction TB
+        PagePool["Pool RAM Contiguo (O_DIRECT + pread)"]:::runtime
+        PagedBitCOS[("Paged BitCOS v1.1 (4 KB NVMe)")]:::storage
+        L1RAM["L1: RAM Activa (KV INT8 / FP32)"]:::runtime
+        L2Latent["L2: Latentes Comprimidos"]:::runtime
+        L3SQLite[("L3: SQLite FTS5 Disco")]:::storage
+        PagePool <--> PagedBitCOS
+        L1RAM <--> L2Latent
+        L2Latent <--> L3SQLite
+    end
+
     CombinedEmbed --> SharedCore
-    PagePool <--> PagedMoE
     PagedMoE --> Stage1
     MLA --> LMHead
+    PagedMoE <--> PagePool
+    MLA <--> L1RAM
 
     classDef input fill:#0c4a6e,stroke:#38bdf8,stroke-width:2px,color:#f0f9ff
     classDef core fill:#3b0764,stroke:#a78bfa,stroke-width:2px,color:#f5f3ff

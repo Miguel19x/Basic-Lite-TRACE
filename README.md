@@ -92,6 +92,7 @@ python train.py --steps 1000 --batch_size 32 --warmup_ratio 0.40 --device cpu
 ## 3. Architecture Overview & Five Canonical Axes
 
 ```mermaid
+%%{init: {'flowchart': {'subGraphTitleMargin': {'top': 10, 'bottom': 14}}}}%%
 flowchart TD
     subgraph InputStage ["1. Input & Positional Encoding"]
         direction TB
@@ -105,25 +106,13 @@ flowchart TD
         AbacusLayer --> CombinedEmbed
     end
 
-    subgraph MemoryHierarchy ["4. Physical Resource Managers"]
-        direction TB
-        PagedBitCOS[("Paged BitCOS v1.1 (4 KB NVMe)")]:::storage
-        PagePool["RAM Page Pool (O_DIRECT + pread)"]:::runtime
-        L1RAM["L1: Active RAM (INT8 / FP32 KV)"]:::runtime
-        L2Latent["L2: Compressed Latents"]:::runtime
-        L3SQLite[("L3: SQLite FTS5 Disk")]:::storage
-        PagedBitCOS <--> PagePool
-        L1RAM <--> L2Latent
-        L2Latent <--> L3SQLite
-    end
-
     subgraph CoreTernary ["2. Resident Ternary Core (W1.58A8 — AVX2/FMA)"]
         direction TB
         SharedCore["BitLinear W1.58A8 Core (0 FP32 Weights)"]:::core
-        MLA["Phase 3: Ternary MLA (4x–15.75x KV) + FFN"]:::core
         PagedMoE["Phases 1–2: Ternary GQA (4:2) + Resident MoE"]:::core
-        SharedCore --> MLA
+        MLA["Phase 3: Ternary MLA (4x–15.75x KV) + FFN"]:::core
         SharedCore --> PagedMoE
+        SharedCore --> MLA
     end
 
     subgraph TwoStageField ["3. Execution Heads & Output Contracts"]
@@ -138,10 +127,23 @@ flowchart TD
         Stage2 --> OutputBytes
     end
 
+    subgraph MemoryHierarchy ["4. Physical Resource Managers"]
+        direction TB
+        PagePool["RAM Page Pool (O_DIRECT + pread)"]:::runtime
+        PagedBitCOS[("Paged BitCOS v1.1 (4 KB NVMe)")]:::storage
+        L1RAM["L1: Active RAM (INT8 / FP32 KV)"]:::runtime
+        L2Latent["L2: Compressed Latents"]:::runtime
+        L3SQLite[("L3: SQLite FTS5 Disk")]:::storage
+        PagePool <--> PagedBitCOS
+        L1RAM <--> L2Latent
+        L2Latent <--> L3SQLite
+    end
+
     CombinedEmbed --> SharedCore
-    PagePool <--> PagedMoE
     PagedMoE --> Stage1
     MLA --> LMHead
+    PagedMoE <--> PagePool
+    MLA <--> L1RAM
 
     classDef input fill:#0c4a6e,stroke:#38bdf8,stroke-width:2px,color:#f0f9ff
     classDef core fill:#3b0764,stroke:#a78bfa,stroke-width:2px,color:#f5f3ff
