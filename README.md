@@ -1,4 +1,4 @@
-# Basic-Lite TRACE: Standalone C (AVX2 + O_DIRECT) W1.58A8 Inference Engine for Consumer CPUs
+# Basic-Lite TRACE: Standalone C (AVX-512 VNNI / AVX2 + O_DIRECT) W1.58A8 Inference Engine for Consumer CPUs
 
 > **Language / Idioma:** **English** | [Español](README.es.md)
 
@@ -8,7 +8,9 @@
 ![License](https://img.shields.io/badge/license-Source--Available-red)
 [![Basic-Lite TRACE CI](https://github.com/Miguel19x/Basic-Lite-TRACE/actions/workflows/ci.yml/badge.svg)](https://github.com/Miguel19x/Basic-Lite-TRACE/actions/workflows/ci.yml)
 
-**Basic-Lite TRACE** (*Ternary Resident Architecture for Convergent Execution*) is an ultra-low-precision (**W1.58A8**) neural architecture and standalone C inference engine (**AVX2/FMA + `O_DIRECT` + MLA INT8 KV**) created and led by **Miguel19x**. On a 2-core consumer laptop CPU (**Intel Core i3-1115G4**, 16 GB RAM, NVMe SSD, Linux x86_64, no GPU), the standalone C runtime executes a 100% ternary **47.2M bilingual (EN/ES) language model** (`45m-bi`, **31.02 MB** 4 KB-aligned binary) at **214–237 tokens/s** in **36.22 MB peak RAM**, with Python $\to$ C export parity of `max_diff` $= 3.34 \times 10^{-6}$ and zero FP32 weight expansion in RAM.
+**Basic-Lite TRACE** (*Ternary Resident Architecture for Convergent Execution*) is an ultra-low-precision (**W1.58A8**) neural architecture and standalone C inference engine (**AVX-512 VNNI / AVX2/FMA + `O_DIRECT` + MLA/GQA INT8 KV + C JSON Constrained Decoding**) created and led by **Miguel19x**. On a 2-core consumer laptop CPU (**Intel Core i3-1115G4**, 16 GB RAM, NVMe SSD, Linux x86_64, no GPU), the standalone C runtime executes:
+- **2B Real Scale (`BitNet-b1.58-2B-4T`, 1.2 GB `Paged BitCOS v1.1`, `TRTK v2` 128K BPE):** **`pp128` at 109–113.7 tok/s**, **`pp512` at 83.12 tok/s** (surpassing `bitnet.cpp` `60.4–80.8 tok/s`), **`tg32` at 12.5–15.0 tok/s**, **WikiText-2 PPL = `16.24`** (vs. `30.46` patched / `54.09` unpatched `bitnet.cpp`), in **1,255.3 MB peak RAM** (`422.9 ms` `O_DIRECT` load, 0 FP32 weights in `BitLinear`).
+- **47.2M Bilingual LM (`45m-bi`, 31.02 MB):** **214–237 tokens/s** in **36.22 MB peak RAM**, Python $\to$ C parity `max_diff` $= 3.34 \times 10^{-6}$.
 
 Architecturally, TRACE is governed by **selective residency and execution** (`Paged BitCOS`, 4 KB OS-page alignment, I/O-aware MoE routing, and 3-tier context memory), designed to scale toward multi-billion-parameter NVMe-paged models by decoupling total disk capacity from active working RAM under pre-registered, reproducible protocols.
 
@@ -16,7 +18,26 @@ Architecturally, TRACE is governed by **selective residency and execution** (`Pa
 
 ## 1. Empirical Results & Hardware Benchmarks
 
-### 1.1. Phase 3 — Bilingual `45m-bi` W1.58 LM & Standalone C Engine (v1.4.0-trace, Milestone 3.7)
+### 1.1. Phase 4 — 2B-Scale C Engine (AVX-512 VNNI) & 4-Domain TIR/L3 Benchmark (v1.5.0-trace)
+
+**Phase 4A** scales the native C engine to real 2B ternary weights (`microsoft/bitnet-b1.58-2B-4T`, MIT license, imported via [tools/import_bitnet.py](tools/import_bitnet.py) into `Paged BitCOS v1.1` + `TRTK v2` 128K LLaMA-3 BPE) with **GQA (4:1)**, split-half RoPE, gated `ReLU²` FFN, compact `FP16`/`INT8` embeddings, and **AVX-512 VNNI** (`vpdpbusd`, single-pass `K_TILE_SIZE=8192`, 8-row FP16 `lm_head`). **Phase 4B** adds a strict permission **TIR Sandbox**, offline **SQLite FTS5 L3 encyclopedia**, deterministic **C JSON constrained decoding** (`csrc/lm/trace_grammar.c`), and a symmetric **`C1–C3` 4-domain evaluation suite** (full report: [docs/FASE4_BENCHMARK.md](docs/FASE4_BENCHMARK.md), raw JSON: [results/fase4b_bench_2b_c1_c3.json](results/fase4b_bench_2b_c1_c3.json)).
+
+| 2B Engine Benchmark (`i3-1115G4`, 2 physical cores, `OMP_NUM_THREADS=2`) | **Basic-Lite TRACE (AVX-512 VNNI)** | `bitnet.cpp` (unpatched GGUF) | `bitnet.cpp` (patched `llama-bpe`) |
+| :--- | :---: | :---: | :---: |
+| **Prefill `pp128` / `pp512`** | **109.2–113.7 / 83.12 tok/s** | — / 60.4–80.8 tok/s | — / 60.4–80.8 tok/s |
+| **Decode `tg32` (`S=1`)** | **12.50 – 15.01 tok/s** | 14.18 – 15.17 tok/s | 14.18 – 15.17 tok/s |
+| **WikiText-2 PPL (`2×512`)** | **16.24** | 54.09 | 30.46 |
+| **Peak RAM / `O_DIRECT` Load** | **1,255.3 MB / 422.9 ms (`2 preads`)** | ~1.3 GB | ~1.3 GB |
+
+| Phase 4B 4-Domain Baseline (Base 2B, `--max-new-tokens 48`) | Overall Full-EM | Code / Terminal | Math / Logic | Long Docs (`needle` / `synth`) | Factual | Response Brier ↓ | Sandbox Escapes |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`C1`** (Model only) | 25.0% (`2/8`) | 0.0% | 0.0% | **100.0%** (`1.0` / `1.0`) | 0.0% | `0.3482` | `0` |
+| **`C2`** (+ Offline SQLite L3) | **50.0%** (`4/8`) | 0.0% | 0.0% | **100.0%** (`1.0` / `1.0`) | **100.0%** | **`0.2365`** | `0` |
+| **`C3`** (+ L3 + TIR C JSON Mask) | 37.5% (`3/8`) | 0.0% | 0.0% | 50.0% (`1.0` / `0.0`) | **100.0%** | `0.3476` | **`0`** |
+
+*(The untrained base 2B gap in `C3`—0% on Code/Math and 2/8 tool calls closing within 24 tokens—is the exact baseline targeted by Phase 5 `<think>` + TIR SFT + GRPO.)*
+
+### 1.2. Phase 3 — Bilingual `45m-bi` W1.58 LM & Standalone C Engine (v1.4.0-trace, Milestone 3.7)
 
 **Milestone 3.7** completes Phase 3 with a 100% ternary W1.58 bilingual (EN/ES) autoregressive language model (**`45m-bi`**, **47.2M parameters**) pretrained on Kaggle (`2× NVIDIA Tesla T4`, DDP, 7h 43m 03s) for 8,000 steps (**524.3M tokens**) via Continual QAT (FP16W warmup steps 1–1200 $\to$ strict W1.58 STE steps 1201–8000), converging to $\text{Train Loss} = 2.88$, $\text{Val Loss} = 3.09$, **$\text{Val PPL} = 22.08$** (full reports: [docs/HITO_3_7_BENCHMARKS.md](docs/HITO_3_7_BENCHMARKS.md), [docs/FASE3_BENCHMARK.md](docs/FASE3_BENCHMARK.md)).
 
@@ -35,7 +56,7 @@ Measured with `/usr/bin/time -v ./trace_lm` over 100 generated tokens:
 | **Scalar C99** | **INT8 KV** | 347.09 ± 69.78 ms | 26.47 ± 3.48 tok/s | 20.89 tok/s | 36.22 MB | Scalar INT8 Baseline |
 | **Scalar C99** | **FP32 KV** | 377.73 ± 74.55 ms | 24.30 ± 0.17 tok/s | 24.91 tok/s | 36.89 MB | Scalar FP32 Baseline |
 
-### 1.2. Phase 1 — Compositional Arithmetic Convergence (v1.2.0-trace, 5 Fixed Seeds)
+### 1.3. Phase 1 — Compositional Arithmetic Convergence (v1.2.0-trace, 5 Fixed Seeds)
 Evaluated across 5 fixed seeds (`42, 123, 456, 789, 999`) at step 6000 on CPU (2 threads, i3-1115G4), logged in [results/eval_fase1_bitnet_5semillas_results.json](results/eval_fase1_bitnet_5semillas_results.json):
 
 | Metric | Phase 2b (Baseline) | **Phase 1 (BitNet QAT Schedule, v1.2.0)** | Delta |
@@ -184,22 +205,25 @@ flowchart TD
 ```
 .
 ├── .github/                                  # CI (Ubuntu + ASan/UBSan) & GitHub governance templates
-├── csrc/                                     # Modular native C engine (O_DIRECT, AVX2/FMA, OpenMP)
-│   ├── lm/                                   # Autoregressive LM C engine (BPE, MLA, INT8 KV, trace_lm)
-│   ├── paged_dispatch.{c,h}                  # Thread-safe scalar / AVX2 dispatch for ternary GEMM
-│   ├── paged_gemm_avx2.c / _scalar.c         # AVX2 Add-Sub & portable C99 GEMM micro-kernels
+├── csrc/                                     # Modular native C engine (O_DIRECT, AVX-512 VNNI/AVX2, OpenMP)
+│   ├── lm/                                   # Autoregressive LM C engine (BPE v1/v2, MLA/GQA, INT8 KV, JSON PDA)
+│   ├── paged_dispatch.{c,h}                  # Thread-safe scalar / AVX2 / AVX-512 dispatch for ternary GEMM
+│   ├── paged_gemm_avx512.c / _avx2.c / _scalar.c # AVX-512 VNNI, AVX2 Add-Sub & portable C99 GEMM micro-kernels
 │   ├── trace_loader.c / trace_causal.c       # 4 KB O_DIRECT loader & 2-stage causal CLI (trace_infer)
 │   └── trace_infer.h / trace_math.h / paged_unpack.h
 ├── trace/                                    # Canonical Python package
 │   ├── core/                                 # 3-tier context manager (RAM/Latent/SQLite FTS5) & types
+│   ├── eval/                                 # Phase 4B 4-domain C1–C3 benchmark & Brier/ECE calibration
 │   ├── layers/                               # Abacus, BitLinear W1.58A8, FFN, RMSNorm, RoPE, Embeddings
-│   ├── lm/                                   # TRACELanguageModel, ternary MLA, config & BPE tokenizer
+│   ├── lm/                                   # TRACELanguageModel, ternary MLA & GQA, config & BPE tokenizer
 │   ├── modules/                              # Attention, PagedMoE & SharedResidentTernaryCore
 │   ├── models/                               # TRACECausalModel (Two-Stage Causal Field)
 │   ├── ops/                                  # ctypes bindings to libpaged_gemm.so & CPU ternary ops
-│   └── serialization/                        # Paged BitCOS v1 / v1.1 reader/writer
-├── scripts/ / notebooks/                     # LM corpus, DDP training, benchmarks & GPU pilot notebooks
-├── tests/                                    # 15 verification suites (AVX2, O_DIRECT, parity, MLA, E0, CLI)
+│   ├── serialization/                        # Paged BitCOS v1 / v1.1 reader/writer (FP32/FP16/INT8 emb)
+│   └── tir/                                  # Strict Sandbox, AST math calculator & offline SQLite L3 store
+├── tools/                                    # Pure-Python streaming BitNet-2B -> Paged BitCOS v1.1 importer
+├── scripts/ / notebooks/                     # LM corpus, DDP training, 2B PPL/4B runners & GPU notebooks
+├── tests/                                    # 24 verification suites (285 tests: SIMD, GQA, BPE v2, TIR, JSON PDA)
 ├── docs/                                     # Benchmarks, provenance, SHA-256 + RFC 3161 (.tsr)
 ├── results/                                  # Confirmatory multi-seed JSONs & benchmark artifacts
 ├── pyproject.toml / requirements.txt / Makefile / ruff.toml

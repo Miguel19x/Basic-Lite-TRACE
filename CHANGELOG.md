@@ -4,6 +4,29 @@ Todas las modificaciones, versiones y evoluciones arquitectónicas de **Basic-Li
 
 ---
 
+## [TRACE-1.5.0] — Fase 4 (4A + 4B): Motor C 2B (AVX-512 VNNI), GQA, BPE 128K, Capa TIR y Banco 4 Dominios — 2026-11-25
+
+### Añadido y Consolidado
+* **Fase 4A — Motor C a Escala 2B Real (`microsoft/bitnet-b1.58-2B-4T` en `i3-1115G4`, 2 núcleos):**
+  - Kernel ternario **AVX-512 VNNI** (`csrc/paged_gemm_avx512.c`: `vpdpbusd` sin resta de 1, micro-kernels `4×4`/`2×4` ZMM, `K_TILE_SIZE = 8192` en una pasada, cuantización/descuantización INT8 vectorizada y `lm_head` FP16 de 8 filas).
+  - Soporte **GQA (4:1)**, RoPE split-half con `rope_theta` configurable, FFN gated `ReLU²`, `sub_ln` opcional y embeddings compactos `FP16`/`INT8` en `Paged BitCOS v1.1` (`trace/lm/gqa.py`).
+  - Tokenizador **`TRTK v2` 128K** LLaMA-3 Byte-Level BPE con plantilla de chat (`--chat`/`--system`) e importador streaming puro Python (`tools/import_bitnet.py`).
+  - Benchmarks empíricos registrados en `docs/FASE4_BENCHMARK.md`: `pp128` **109.2–113.7 tok/s**, `pp512` **83.12 tok/s** (superando `bitnet.cpp` `60.4–80.8 tok/s`), `tg32` **12.50–15.01 tok/s**, WikiText-2 PPL **`16.24`** (vs. `30.46` parcheado / `54.09` sin parchear en `bitnet.cpp`), RAM pico `1,255.3 MB`, carga `O_DIRECT` `422.9 ms` (`2 preads`).
+* **Fase 4B — Banco de 4 Dominios + Matriz `C1–C3` + Capa TIR + Sandbox:**
+  - Sandbox de permisos estricto (`trace/tir/sandbox.py`, 0 escapes), calculadora AST segura (`trace/tir/tools.py`) y enciclopedia offline SQLite FTS5 (`trace/tir/l3_store.py`).
+  - Constrained Decoding JSON determinista en C (`csrc/lm/trace_grammar.{h,c}`) sobre TRTK v1 y v2, cableado en CI ASan/UBSan.
+  - Banco de 4 dominios (`trace/eval/bench_4domains.py`, `scripts/run_bench_4b.py`) con desglose `needle` vs. `synthesis`, matriz simétrica `C1–C3` y calibración desacoplada ECE/Brier; línea base 2B persistida en `results/fase4b_bench_2b_c1_c3.json` (`C1` 25.0%, `C2` 50.0% con `factual` 100%, `C3` 37.5%, `out_of_sandbox_executions: 0`).
+  - Suite completa verificada: **285/285 tests** en verde (`make check`, `ruff`, `-Wall -Wextra -Werror -Wvla`).
+
+---
+
+## [TRACE-1.4.0] — Fase 3 (Hito 3.7): Modelo Bilingüe `45m-bi` W1.58 y Motor C `trace_lm` — 2026-11-24
+
+### Añadido y Consolidado
+* Preentrenamiento 100% ternario W1.58 de `45m-bi` (47.2M parámetros, EN/ES, 524.3M tokens, `Val PPL = 22.08`), exportación `Paged BitCOS v1.1` (31.02 MB, paridad `max_diff = 3.34e-6`) e inferencia standalone en CPU a **214–237 tok/s** en **36.22 MB RAM pico** (`docs/HITO_3_7_BENCHMARKS.md`).
+
+---
+
 ## [TRACE-1.3.0] — Motor Nativo C Standalone (`O_DIRECT` + AVX2) y Cierre de Fase 2 — 2026-11-22
 
 ### Añadido y Consolidado
