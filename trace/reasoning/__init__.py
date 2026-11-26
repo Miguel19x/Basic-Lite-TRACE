@@ -18,8 +18,11 @@ from trace.reasoning.rewards import (
     score_reasoning_completion,
 )
 from trace.reasoning.trainer import (
+    enable_bitnet_qat_ste_on_lora,
     gather_token_logprobs,
     grpo_policy_loss,
+    quantize_a8_ste,
+    quantize_w158_ste,
     score_group_completions,
     sft_loss_on_completion,
 )
@@ -29,9 +32,12 @@ __all__ = [
     "ReasoningTraceExample",
     "build_verified_tir_dataset",
     "compute_grpo_advantages",
+    "enable_bitnet_qat_ste_on_lora",
     "format_trace_target",
     "gather_token_logprobs",
     "grpo_policy_loss",
+    "quantize_a8_ste",
+    "quantize_w158_ste",
     "score_group_completions",
     "score_reasoning_completion",
     "sft_loss_on_completion",

@@ -11,10 +11,63 @@ y GRPO / RLVR corto con regularización KL no negativa (estimador de Schulman).
 
 from __future__ import annotations
 
+import types
+
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from trace.reasoning.rewards import compute_grpo_advantages, score_reasoning_completion
+
+
+def quantize_w158_ste(w: torch.Tensor) -> torch.Tensor:
+    """Cuantización ternaria BitNet b1.58 con Straight-Through Estimator (idéntica a import_bitnet.py)."""
+    scale = w.detach().float().abs().mean().clamp_min(1e-5).to(w.dtype)
+    w_q = torch.clamp(torch.round(w / scale), -1.0, 1.0) * scale
+    return w + (w_q - w).detach()
+
+
+def quantize_a8_ste(x: torch.Tensor) -> torch.Tensor:
+    """Cuantización simétrica INT8 por token con STE (idéntica a trace_quantize_rows_int8)."""
+    scale = (x.detach().float().abs().amax(dim=-1, keepdim=True).clamp_min(1e-5) / 127.0).to(x.dtype)
+    x_q = torch.clamp(torch.round(x / scale), -127.0, 127.0) * scale
+    return x + (x_q - x).detach()
+
+
+def enable_bitnet_qat_ste_on_lora(model: nn.Module) -> int:
+    """
+    Aplica QAT-STE W1.58A8 sobre el peso efectivo `W_base + lora_B @ lora_A * scale` de cada capa
+    LoRA (PEFT) durante el forward, garantizando 0 choque de cuantización al exportar con `import_bitnet.py`.
+    Respeta `disable_adapters` (referencia KL de GRPO) y no rompe `merge_and_unload()`.
+    """
+    patched = 0
+    for mod in model.modules():
+        if not (hasattr(mod, "base_layer") and hasattr(mod, "lora_A") and hasattr(mod, "lora_B")):
+            continue
+        if not isinstance(mod.base_layer, nn.Linear):
+            continue
+
+        def _qat_lora_forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:  # noqa: ANN001
+            w_eff = self.base_layer.weight
+            active = getattr(self, "active_adapters", ["default"])
+            disabled = getattr(self, "disable_adapters", False)
+            merged = getattr(self, "merged", False)
+            if not disabled and not merged:
+                for adapter in active:
+                    if adapter in self.lora_A and adapter in self.lora_B:
+                        la = self.lora_A[adapter].weight
+                        lb = self.lora_B[adapter].weight
+                        sc = self.scaling[adapter]
+                        delta = (lb @ la) * sc
+                        w_eff = w_eff + delta.to(w_eff.dtype)
+            w_q = quantize_w158_ste(w_eff)
+            x_q = quantize_a8_ste(x)
+            bias = self.base_layer.bias
+            return F.linear(x_q, w_q.to(x_q.dtype), bias.to(x_q.dtype) if bias is not None else None)
+
+        mod.forward = types.MethodType(_qat_lora_forward, mod)
+        patched += 1
+    return patched
 
 
 def sft_loss_on_completion(

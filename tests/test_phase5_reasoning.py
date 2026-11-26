@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import pytest
 import torch
+import torch.nn as nn
 
 from trace.eval.bench_4domains import _extract_json_object, grade_answer
 from trace.reasoning.dataset import build_verified_tir_dataset, verify_no_bench4b_leakage
 from trace.reasoning.rewards import compute_grpo_advantages, score_reasoning_completion
 from trace.reasoning.trainer import (
+    enable_bitnet_qat_ste_on_lora,
     gather_token_logprobs,
     grpo_policy_loss,
+    quantize_w158_ste,
     sft_loss_on_completion,
 )
 
@@ -134,3 +137,39 @@ def test_sft_loss_respects_explicit_tool_response_loss_mask():
     assert torch.all(logits.grad[0, 3:5, :] == 0.0)
     # Posición 6 predice índice 7 (EOS final = 2 == pad_id): gradiente NO nulo gracias a loss_mask
     assert float(logits.grad[0, 6, :].abs().sum().item()) > 0.0
+
+
+def test_quantize_w158_ste_produces_exact_ternary_levels():
+    torch.manual_seed(3)
+    w = torch.randn(16, 16, requires_grad=True)
+    w_q = quantize_w158_ste(w)
+    scale = w.detach().abs().mean().clamp_min(1e-5)
+    codes = torch.round(w_q / scale)
+    assert set(codes.unique().tolist()).issubset({-1.0, 0.0, 1.0})
+    w_q.sum().backward()
+    assert torch.allclose(w.grad, torch.ones_like(w))
+
+
+def test_enable_bitnet_qat_ste_on_lora_propagates_gradients():
+    torch.manual_seed(5)
+
+    class _FakePeftLora(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.base_layer = nn.Linear(8, 8, bias=False)
+            self.base_layer.weight.requires_grad_(False)
+            self.lora_A = nn.ModuleDict({"default": nn.Linear(8, 2, bias=False)})
+            self.lora_B = nn.ModuleDict({"default": nn.Linear(2, 8, bias=False)})
+            nn.init.ones_(self.lora_B["default"].weight)
+            self.scaling = {"default": 2.0}
+            self.active_adapters = ["default"]
+            self.disable_adapters = False
+            self.merged = False
+
+    mod = _FakePeftLora()
+    assert enable_bitnet_qat_ste_on_lora(mod) == 1
+    x = torch.randn(2, 8)
+    out = mod(x)
+    out.sum().backward()
+    assert float(mod.lora_A["default"].weight.grad.abs().sum().item()) > 0.0
+    assert float(mod.lora_B["default"].weight.grad.abs().sum().item()) > 0.0

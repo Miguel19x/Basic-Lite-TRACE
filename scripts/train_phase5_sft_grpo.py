@@ -36,8 +36,10 @@ from trace.reasoning.dataset import (
     format_llama3_chat_prompt,
 )
 from trace.reasoning.trainer import (
+    enable_bitnet_qat_ste_on_lora,
     gather_token_logprobs,
     grpo_policy_loss,
+    quantize_w158_ste,
     score_group_completions,
     sft_loss_on_completion,
 )
@@ -172,6 +174,7 @@ def run_hf_2b_training(
     lr: float,
     max_seq_len: int,
     use_lora: bool,
+    qat_ste: bool,
     lora_r: int,
     lora_alpha: int,
 ) -> dict[str, Any]:
@@ -219,6 +222,9 @@ def run_hf_2b_training(
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         )
         model = get_peft_model(model, lora_cfg)
+        if qat_ste:
+            n_patched = enable_bitnet_qat_ste_on_lora(model)
+            print(f"[QAT-STE] Activada cuantizacion W1.58A8 STE en {n_patched} capas LoRA.", flush=True)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     # En FP16 + GradScaler (T4), los parámetros entrenables deben vivir en FP32 para evitar
@@ -381,16 +387,47 @@ def run_hf_2b_training(
     out_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(out_dir))
     tokenizer.save_pretrained(str(out_dir))
+
+    # Verificacion rapida post-cuantizacion ternaria antes de descargar el .bin de Kaggle
+    sanity_sample = ""
+    try:
+        model.eval()
+        model.config.use_cache = True
+        if hasattr(model, "gradient_checkpointing_disable"):
+            model.gradient_checkpointing_disable()
+        with torch.no_grad():
+            for name, mod in model.named_modules():
+                if isinstance(mod, torch.nn.Linear) and "lm_head" not in name:
+                    mod.weight.data.copy_(quantize_w158_ste(mod.weight.data))
+            test_prompt = format_llama3_chat_prompt(
+                "Calcula el valor entero exacto de `(12 * 13) + 4`. Responde únicamente con el número entero."
+            )
+            in_ids = tokenizer.encode(test_prompt, add_special_tokens=False)
+            in_t = torch.tensor([in_ids], dtype=torch.long, device=device)
+            out_t = model.generate(
+                input_ids=in_t,
+                max_new_tokens=96,
+                do_sample=False,
+                pad_token_id=int(tokenizer.pad_token_id),
+                eos_token_id=stop_id,
+            )
+            sanity_sample = tokenizer.decode(out_t[0, len(in_ids) :], skip_special_tokens=True)
+            print(f"[TERNARY SANITY CHECK]\n{sanity_sample}", flush=True)
+    except Exception as exc:
+        sanity_sample = f"sanity_error: {exc}"
+
     return {
         "backend": "hf-2b",
         "model_id": model_id,
         "device": device,
         "use_lora": use_lora,
+        "qat_ste": qat_ste,
         "sft_steps": sft_steps,
         "sft_loss_start": losses[0] if losses else 0.0,
         "sft_loss_end": losses[-1] if losses else 0.0,
         "grpo_steps": len(grpo_metrics),
         "grpo_last_metrics": grpo_metrics[-1] if grpo_metrics else {},
+        "ternary_sanity_sample": sanity_sample,
         "saved_dir": str(out_dir),
     }
 
@@ -414,6 +451,7 @@ def main() -> None:
     parser.add_argument("--out-dir", default="/tmp/trace_phase5_out")
     parser.add_argument("--max-seq-len", type=int, default=512)
     parser.add_argument("--use-lora", action="store_true", help="Activa LoRA (PEFT) + merge al guardar")
+    parser.add_argument("--qat-ste", action="store_true", help="Aplica QAT-STE W1.58A8 en capas LoRA (obligatorio para BitNet)")
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     args = parser.parse_args()
@@ -456,6 +494,7 @@ def main() -> None:
             lr=args.lr,
             max_seq_len=args.max_seq_len,
             use_lora=args.use_lora,
+            qat_ste=args.qat_ste,
             lora_r=args.lora_r,
             lora_alpha=args.lora_alpha,
         )
