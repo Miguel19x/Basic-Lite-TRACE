@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -39,7 +40,6 @@ from trace.reasoning.trainer import (
     enable_bitnet_qat_ste_on_lora,
     gather_token_logprobs,
     grpo_policy_loss,
-    quantize_w158_ste,
     score_group_completions,
     sft_loss_on_completion,
 )
@@ -237,6 +237,38 @@ def run_hf_2b_training(
     eot_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
     stop_id = int(eot_id) if isinstance(eot_id, int) and eot_id >= 0 else int(tokenizer.eos_token_id)
 
+    def _run_generation_check(tag: str, prompt_text: str, max_toks: int = 48) -> str:
+        model.eval()
+        if hasattr(model, "gradient_checkpointing_disable"):
+            model.gradient_checkpointing_disable()
+        model.config.use_cache = True
+        with torch.no_grad():
+            in_ids = tokenizer.encode(format_llama3_chat_prompt(prompt_text), add_special_tokens=False)
+            in_t = torch.tensor([in_ids], dtype=torch.long, device=device)
+            out_t = model.generate(
+                input_ids=in_t,
+                max_new_tokens=max_toks,
+                do_sample=False,
+                pad_token_id=int(tokenizer.pad_token_id),
+                eos_token_id=stop_id,
+            )
+            txt = tokenizer.decode(out_t[0, len(in_ids) :], skip_special_tokens=True)
+        model.config.use_cache = False
+        if hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable()
+        model.train()
+        print(f"[{tag}] {txt!r}", flush=True)
+        return txt
+
+    # GUARDRAIL 1 (Fail-Fast en 5 s): verificar que el modelo parcheado con LoRA+QAT-STE
+    # responde coherentemente ANTES de gastar minutos de GPU.
+    pre_txt = _run_generation_check("PREFLIGHT STEP 0", "Calcula 12 * 13. Responde solo el numero.", max_toks=24)
+    if "156" not in pre_txt:
+        raise RuntimeError(
+            f"[ABORTADO EN 5s] El modelo base parcheado falló el preflight (esperaba '156', obtuvo {pre_txt!r}). "
+            "No se gastará GPU en un modelo descalibrado."
+        )
+
     def _encode_sft_with_tool_response_mask(ex: ReasoningTraceExample) -> tuple[list[int], int, list[int]]:
         """Codifica con plantilla LLaMA-3 y enmascara `<tool_response>...</tool_response>` a 0."""
         chat_prompt = format_llama3_chat_prompt(ex.prompt)
@@ -262,11 +294,13 @@ def run_hf_2b_training(
         mask = ([0] * len(p_ids) + comp_mask)[:max_seq_len]
         return ids, min(len(p_ids), len(ids) - 1), mask
 
-    # 1. Fase SFT enmascarada (sin entrenar sobre `<tool_response>` y sin enmascarar `stop_id`)
+    # 1. Fase SFT enmascarada con decaimiento coseno + guardrail temprano en paso 160
     losses: list[float] = []
     model.train()
     optimizer.zero_grad()
     eff_accum = max(1, grad_accum)
+    total_opt_steps = max(1, (sft_steps + eff_accum - 1) // eff_accum)
+    opt_step = 0
 
     for step in range(sft_steps):
         ex = examples[step % len(examples)]
@@ -280,17 +314,37 @@ def run_hf_2b_training(
             raw_loss = sft_loss_on_completion(out.logits, x, pl, pad_id=int(tokenizer.pad_token_id), loss_mask=lmask)
             loss = raw_loss / eff_accum
 
+        raw_val = float(raw_loss.detach().item())
+        if not math.isfinite(raw_val):
+            raise RuntimeError(f"[ABORTADO] Pérdida SFT no finita ({raw_val}) en paso {step + 1}.")
+
         scaler.scale(loss).backward()
-        losses.append(float(raw_loss.detach().item()))
+        losses.append(raw_val)
 
         if (step + 1) % eff_accum == 0 or (step + 1) == sft_steps:
+            opt_step += 1
+            # Decaimiento coseno suave lr -> 0.1 * lr
+            progress = min(1.0, opt_step / total_opt_steps)
+            cur_lr = lr * (0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress)))
+            for pg in optimizer.param_groups:
+                pg["lr"] = cur_lr
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-        if (step + 1) % 100 == 0 or (step + 1) == sft_steps:
-            print(f"[SFT {step + 1}/{sft_steps}] loss={losses[-1]:.4f}", flush=True)
+        if (step + 1) % 80 == 0 or (step + 1) == sft_steps:
+            avg_recent = sum(losses[-80:]) / min(80, len(losses))
+            print(f"[SFT {step + 1}/{sft_steps}] avg_loss={avg_recent:.4f} lr={optimizer.param_groups[0]['lr']:.2e}", flush=True)
+        # GUARDRAIL 2: si tras 160 pasos la pérdida media no ha caído >= 15%, abortar temprano
+        if (step + 1) == 160 and sft_steps >= 240:
+            early_avg = sum(losses[:40]) / 40.0
+            mid_avg = sum(losses[120:160]) / 40.0
+            if mid_avg > early_avg * 0.85:
+                raise RuntimeError(
+                    f"[ABORTADO TEMPRANO EN PASO 160] La pérdida no desciende (inicio={early_avg:.4f} -> paso160={mid_avg:.4f}). "
+                    "Revisa --lr antes de gastar el resto de la sesión GPU."
+                )
 
     # 2. Fase GRPO / RLVR corta verificable (con ejecución real de `calc` si emite `<tool_call>`)
     grpo_metrics: list[dict[str, float]] = []
@@ -385,31 +439,14 @@ def run_hf_2b_training(
     model.save_pretrained(str(out_dir))
     tokenizer.save_pretrained(str(out_dir))
 
-    # Verificacion rapida post-cuantizacion ternaria antes de descargar el .bin de Kaggle
+    # Verificacion post-merge SIN doble cuantizacion (AutoBitLinear ya cuantiza en W1.58A8 en forward)
     sanity_sample = ""
     try:
-        model.eval()
-        model.config.use_cache = True
-        if hasattr(model, "gradient_checkpointing_disable"):
-            model.gradient_checkpointing_disable()
-        with torch.no_grad():
-            for name, mod in model.named_modules():
-                if isinstance(mod, torch.nn.Linear) and "lm_head" not in name:
-                    mod.weight.data.copy_(quantize_w158_ste(mod.weight.data))
-            test_prompt = format_llama3_chat_prompt(
-                "Calcula el valor entero exacto de `(12 * 13) + 4`. Responde únicamente con el número entero."
-            )
-            in_ids = tokenizer.encode(test_prompt, add_special_tokens=False)
-            in_t = torch.tensor([in_ids], dtype=torch.long, device=device)
-            out_t = model.generate(
-                input_ids=in_t,
-                max_new_tokens=96,
-                do_sample=False,
-                pad_token_id=int(tokenizer.pad_token_id),
-                eos_token_id=stop_id,
-            )
-            sanity_sample = tokenizer.decode(out_t[0, len(in_ids) :], skip_special_tokens=True)
-            print(f"[TERNARY SANITY CHECK]\n{sanity_sample}", flush=True)
+        sanity_sample = _run_generation_check(
+            "POST-MERGE TERNARY SANITY CHECK",
+            "Calcula el valor entero exacto de `(12 * 13) + 4`. Responde únicamente con el número entero.",
+            max_toks=96,
+        )
     except Exception as exc:
         sanity_sample = f"sanity_error: {exc}"
 
