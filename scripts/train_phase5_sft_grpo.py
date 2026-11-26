@@ -196,9 +196,11 @@ def run_hf_2b_training(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    if device == "cuda":
-        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    if device == "cuda" and torch.cuda.is_bf16_supported():
+        dtype = torch.bfloat16
     else:
+        # BitNet b1.58 (pesos hasta ±40 + ReLU²) desborda en FP16 (techo 65,504 en T4);
+        # usar FP32 cuando la GPU no soporta BF16 nativo.
         dtype = torch.float32
 
     model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype).to(device)
@@ -227,13 +229,8 @@ def run_hf_2b_training(
             print(f"[QAT-STE] Activada cuantizacion W1.58A8 STE en {n_patched} capas LoRA.", flush=True)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    # En FP16 + GradScaler (T4), los parámetros entrenables deben vivir en FP32 para evitar
-    # `ValueError: Attempting to unscale FP16 gradients`.
-    use_scaler = device == "cuda" and dtype == torch.float16
-    if use_scaler:
-        for p in trainable_params:
-            p.data = p.data.float()
-
+    use_autocast = device == "cuda" and dtype == torch.bfloat16
+    use_scaler = False
     optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=0.01)
     scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
@@ -278,7 +275,7 @@ def run_hf_2b_training(
         pl = torch.tensor([p_len], dtype=torch.long, device=device)
         lmask = torch.tensor([mask_list], dtype=torch.float32, device=device)
 
-        with torch.amp.autocast("cuda", dtype=dtype, enabled=(device == "cuda")):
+        with torch.amp.autocast("cuda", dtype=dtype, enabled=use_autocast):
             out = model(input_ids=x)
             raw_loss = sft_loss_on_completion(out.logits, x, pl, pad_id=int(tokenizer.pad_token_id), loss_mask=lmask)
             loss = raw_loss / eff_accum
@@ -357,7 +354,7 @@ def run_hf_2b_training(
 
             adv = torch.tensor(adv_list, dtype=torch.float32, device=device)
 
-            with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype, enabled=(device == "cuda")):
+            with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype, enabled=use_autocast):
                 with model.disable_adapter():
                     ref_logits = model(input_ids=gen_out).logits
                     log_ref = gather_token_logprobs(ref_logits, gen_out)
@@ -366,7 +363,7 @@ def run_hf_2b_training(
 
             model.train()
             optimizer.zero_grad()
-            with torch.amp.autocast("cuda", dtype=dtype, enabled=(device == "cuda")):
+            with torch.amp.autocast("cuda", dtype=dtype, enabled=use_autocast):
                 new_logits = model(input_ids=gen_out).logits
                 log_new = gather_token_logprobs(new_logits, gen_out)
                 loss, m = grpo_policy_loss(log_new, log_old, log_ref, adv, comp_mask, kl_beta=0.04)
