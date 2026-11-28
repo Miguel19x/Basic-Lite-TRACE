@@ -12,6 +12,7 @@ y GRPO / RLVR corto con regularización KL no negativa (estimador de Schulman).
 from __future__ import annotations
 
 import types
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -93,7 +94,7 @@ def sft_loss_on_completion(
         raise ValueError("seq_len debe ser >= 2 para calcular pérdida causal SFT")
 
     shift_logits = logits[:, :-1, :].contiguous()
-    shift_labels = input_ids[:, 1:].clone()
+    shift_labels = input_ids[:, 1:]
 
     pos = torch.arange(1, seq_len, device=input_ids.device).unsqueeze(0).expand(bsz, -1)
     prompt_mask = pos < prompt_lengths.unsqueeze(1)
@@ -101,24 +102,29 @@ def sft_loss_on_completion(
         ignore_mask = prompt_mask | (loss_mask[:, 1:] <= 0)
     else:
         ignore_mask = prompt_mask | (shift_labels == pad_id)
-    shift_labels[ignore_mask] = -100
+    shift_labels = shift_labels.masked_fill(ignore_mask, -100)
 
-    valid_tokens = int((shift_labels != -100).sum().item())
-    if valid_tokens == 0:
-        return shift_logits.sum() * 0.0
-
-    return F.cross_entropy(
-        shift_logits.view(-1, vocab),
-        shift_labels.view(-1),
+    per_tok = F.cross_entropy(
+        shift_logits.reshape(-1, vocab),
+        shift_labels.reshape(-1),
         ignore_index=-100,
+        reduction="none",
     )
+    valid_mask = (shift_labels.reshape(-1) != -100).to(per_tok.dtype)
+    return (per_tok * valid_mask).sum() / valid_mask.sum().clamp_min(1.0)
 
 
 def gather_token_logprobs(logits: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
-    """Extrae log p(target_ids | contexto) con shape [B, T-1]."""
-    log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
-    targets = target_ids[:, 1:].unsqueeze(-1)
-    return log_probs.gather(dim=-1, index=targets).squeeze(-1)
+    """Extrae log p(target_ids | contexto) con shape [B, T-1] sin materializar [B, T-1, V] FP32."""
+    shift_logits = logits[:, :-1, :]
+    bsz, seq_len_m1, vocab = shift_logits.shape
+    shift_targets = target_ids[:, 1:]
+    nll = F.cross_entropy(
+        shift_logits.float().reshape(-1, vocab),
+        shift_targets.reshape(-1),
+        reduction="none",
+    )
+    return (-nll).reshape(bsz, seq_len_m1)
 
 
 def grpo_policy_loss(
@@ -130,11 +136,15 @@ def grpo_policy_loss(
     *,
     clip_eps: float = 0.2,
     kl_beta: float = 0.04,
-) -> tuple[torch.Tensor, dict[str, float]]:
+    defer_metrics: bool = False,
+) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Objetivo GRPO / RLVR (sin red crítico):
       L = -mean( min(r * A, clip(r, 1-eps, 1+eps) * A) - kl_beta * KL_schulman )
     donde KL_schulman = exp(log_ref - log_new) - (log_ref - log_new) - 1 >= 0.
+
+    Si `defer_metrics=True`, devuelve tensores escalares desconectados sin llamar `.item()`
+    para evitar sincronizaciones host-device antes de `loss.backward()` en TPU/XLA.
     """
     mask = completion_mask.float()
     denom = mask.sum().clamp_min(1.0)
@@ -153,10 +163,20 @@ def grpo_policy_loss(
     per_tok_loss = -(policy_obj - kl_beta * kl_per_tok)
     loss = (per_tok_loss * mask).sum() / denom
 
+    kl_mean_t = ((kl_per_tok * mask).sum() / denom).detach()
+    ratio_mean_t = ((ratio * mask).sum() / denom).detach()
+    if defer_metrics:
+        metrics: dict[str, Any] = {
+            "loss": loss.detach(),
+            "kl_mean": kl_mean_t,
+            "ratio_mean": ratio_mean_t,
+        }
+        return loss, metrics
+
     metrics = {
         "loss": float(loss.detach().item()),
-        "kl_mean": float(((kl_per_tok * mask).sum() / denom).detach().item()),
-        "ratio_mean": float(((ratio * mask).sum() / denom).detach().item()),
+        "kl_mean": float(kl_mean_t.item()),
+        "ratio_mean": float(ratio_mean_t.item()),
     }
     return loss, metrics
 

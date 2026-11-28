@@ -12,8 +12,11 @@ from trace.eval.bench_4domains import (
     ModelBackend,
     build_default_l3_corpus,
     build_default_tasks,
+    build_extended_l3_corpus,
+    build_extended_suite,
     compute_response_brier,
     compute_token_ece,
+    count_think_tokens,
     evaluate_4domains,
     grade_answer,
 )
@@ -24,8 +27,11 @@ __all__ = [
     "ModelBackend",
     "build_default_l3_corpus",
     "build_default_tasks",
+    "build_extended_l3_corpus",
+    "build_extended_suite",
     "compute_response_brier",
     "compute_token_ece",
+    "count_think_tokens",
     "evaluate_4domains",
     "grade_answer",
 ]

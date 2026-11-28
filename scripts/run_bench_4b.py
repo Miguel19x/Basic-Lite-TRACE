@@ -28,7 +28,14 @@ from pathlib import Path
 
 import numpy as np
 
-from trace.eval.bench_4domains import GenerationResult, evaluate_4domains
+from trace.eval.bench_4domains import (
+    GenerationResult,
+    build_default_l3_corpus,
+    build_default_tasks,
+    build_extended_l3_corpus,
+    build_extended_suite,
+    evaluate_4domains,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -297,22 +304,49 @@ class NativeTraceLMBackend:
         )
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Runner de Fase 4B: Banco 4 Dominios + Matriz C1-C3")
     parser.add_argument("--model", required=True, help="Ruta al binario Paged BitCOS (.bin)")
     parser.add_argument("--tokenizer", required=True, help="Ruta al tokenizador TRTK (.bin)")
+    parser.add_argument(
+        "--suite",
+        choices=["smoke", "extended"],
+        default="smoke",
+        help="Suite de evaluación: 'smoke' (N=8) o 'extended' (N=64 bilingüe EN/ES)",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=48, help="Presupuesto simétrico de tokens por tarea")
     parser.add_argument("--max-ctx", type=int, default=1024, help="Ventana de contexto máxima")
     parser.add_argument("--json-out", default="", help="Ruta de salida para el reporte JSON")
-    args = parser.parse_args()
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return build_arg_parser().parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
 
     os.environ.setdefault("OMP_NUM_THREADS", "2")
+    if args.suite == "extended":
+        tasks = build_extended_suite()
+        l3_corpus = build_extended_l3_corpus()
+    else:
+        tasks = build_default_tasks()
+        l3_corpus = build_default_l3_corpus()
+
     t0 = time.perf_counter()
     backend = NativeTraceLMBackend(args.model, args.tokenizer, max_ctx=args.max_ctx)
     try:
-        report = evaluate_4domains(backend, max_new_tokens=args.max_new_tokens)
+        report = evaluate_4domains(
+            backend,
+            tasks=tasks,
+            l3_corpus=l3_corpus,
+            max_new_tokens=args.max_new_tokens,
+        )
     finally:
         backend.close()
+    report["suite"] = str(args.suite)
     report["elapsed_sec"] = round(time.perf_counter() - t0, 3)
     report["model"] = str(args.model)
     report["tokenizer"] = str(args.tokenizer)
@@ -323,15 +357,25 @@ def main() -> None:
         out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print(json.dumps({
+        "suite": report["suite"],
+        "num_tasks": report["num_tasks"],
         "elapsed_sec": report["elapsed_sec"],
         "out_of_sandbox_executions": report["out_of_sandbox_executions"],
         "summary": {
             cond: {
                 "overall_em": data["overall_em"],
+                "abstention_em": data["abstention_em"],
                 "by_domain": data["by_domain"],
                 "long_docs_breakdown": data["long_docs_breakdown"],
                 "token_ece": round(data["token_ece"], 4) if data["token_ece"] is not None else None,
                 "response_brier": round(data["response_brier"], 4),
+                "mean_think_tokens": round(data["mean_think_tokens"], 2),
+                "total_wall_clock_s": round(data["total_wall_clock_s"], 4),
+                "mean_wall_clock_to_correct_s": (
+                    round(data["mean_wall_clock_to_correct_s"], 4)
+                    if data["mean_wall_clock_to_correct_s"] is not None
+                    else None
+                ),
                 "valid_json_tool_calls": data["valid_json_tool_calls"],
                 "total_json_tool_calls": data["total_json_tool_calls"],
             }

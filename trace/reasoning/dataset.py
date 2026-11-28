@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from trace.eval.bench_4domains import build_default_tasks
+from trace.eval.bench_4domains import build_default_tasks, build_extended_suite
 from trace.tir.l3_store import L3Encyclopedia
 from trace.tir.sandbox import Sandbox, SandboxPolicy
 from trace.tir.tools import TIRToolRegistry
@@ -78,9 +78,20 @@ def format_trace_target(
 
 
 def verify_no_bench4b_leakage(examples: list[ReasoningTraceExample]) -> bool:
-    """Verifica que ningún prompt ni respuesta de entrenamiento duplique tareas ocultas de Fase 4B."""
-    hidden_prompts = {t.prompt.strip() for t in build_default_tasks()}
-    hidden_markers = {"DELTA-7492", "sum_squares.py", "config_target.txt", "347 * 829", "gcd(4620, 3570)"}
+    """Verifica que ningún prompt ni respuesta de entrenamiento duplique tareas ocultas de Fase 4B (smoke o extended)."""
+    all_hidden = build_default_tasks() + build_extended_suite()
+    hidden_prompts = {t.prompt.strip() for t in all_hidden}
+    hidden_markers = {
+        "DELTA-7492",
+        "ORION-5814",
+        "VEGA-3091",
+        "LYRA-8842",
+        "SIRIO-4179",
+        "ALTAIR-6253",
+        "DENEB-9317",
+        "347 * 829",
+        "gcd(4620, 3570)",
+    } | {fname for t in all_hidden for fname in t.sandbox_files}
     for ex in examples:
         if ex.prompt.strip() in hidden_prompts:
             return False
@@ -165,6 +176,8 @@ def build_verified_tir_dataset(
         c = rng.randint(11, 89)
         d = rng.randint(3, 6)
         if i % 2 == 0:
+            while a == 347 and b == 829:
+                b = rng.randint(101, 989)
             expr = f"({a} * {b}) - ({c} * {a}) + ({d} ** 3)"
         else:
             g1 = rng.randint(12, 48) * rng.randint(3, 9)
