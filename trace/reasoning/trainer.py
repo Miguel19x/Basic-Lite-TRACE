@@ -185,7 +185,7 @@ def score_group_completions(
     completions: list[str],
     expected_answer: str,
     *,
-    max_target_chars: int = 640,
+    max_target_chars: int = 2048,
 ) -> tuple[list[float], list[float]]:
     """Evalúa un grupo de G completados con recompensas RLVR y devuelve (rewards, advantages)."""
     rewards = [

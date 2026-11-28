@@ -173,3 +173,107 @@ def test_enable_bitnet_qat_ste_on_lora_propagates_gradients():
     out.sum().backward()
     assert float(mod.lora_A["default"].weight.grad.abs().sum().item()) > 0.0
     assert float(mod.lora_B["default"].weight.grad.abs().sum().item()) > 0.0
+
+
+def test_verified_tir_dataset_is_bilingual_50_50_en_es():
+    examples = build_verified_tir_dataset(
+        num_math=20,
+        num_code=12,
+        num_factual=12,
+        general_ratio=0.15,
+        seed=42,
+    )
+    en_count = sum(1 for ex in examples if ex.language == "en")
+    es_count = sum(1 for ex in examples if ex.language == "es")
+    assert en_count + es_count == len(examples)
+    assert abs(en_count - es_count) <= 2
+
+
+def test_verified_tir_dataset_uses_english_pivoted_thoughts_with_varied_phrasings():
+    examples = build_verified_tir_dataset(
+        num_math=20,
+        num_code=12,
+        num_factual=12,
+        general_ratio=0.15,
+        seed=42,
+    )
+    math_thoughts = [ex.thought_before_tool for ex in examples if ex.category == "math_tir"]
+    # Multiple distinct phrasing stems (not 1 monolithic repeated template)
+    distinct_prefixes = {t[:28] for t in math_thoughts}
+    assert len(distinct_prefixes) >= 3
+    # English-pivoted thinking (no Spanish-only boilerplate)
+    assert all("invoco" not in t.lower() and "propenso" not in t.lower() for t in math_thoughts)
+
+
+def test_verified_tir_dataset_includes_bilingual_abstention_examples():
+    examples = build_verified_tir_dataset(
+        num_math=20,
+        num_code=12,
+        num_factual=12,
+        general_ratio=0.15,
+        seed=42,
+    )
+    answers = {ex.answer for ex in examples}
+    assert "INSUFFICIENT_EVIDENCE" in answers
+    assert "EVIDENCIA_INSUFICIENTE" in answers
+    assert verify_no_bench4b_leakage(examples) is True
+
+
+def test_score_reasoning_completion_does_not_penalize_deep_non_repetitive_thinking():
+    deep_steps = " ".join(f"Step {i}: verify intermediate quantity q{i} equals {i * 7}." for i in range(1, 22))
+    text = f"<think>{deep_steps}</think>\n<answer>147</answer>"
+    bd = score_reasoning_completion(text, "147")
+    assert bd.outcome_reward == 1.0
+    assert bd.length_penalty == 0.0
+    assert bd.repetition_penalty == 0.0
+    assert bd.total_reward >= 1.10
+
+
+def test_score_reasoning_completion_penalizes_degenerate_loop_in_think():
+    loop_think = "check da915fc77e vs da915fc77e no it is da915fc77e " * 5
+    text = f"<think>{loop_think}</think>\n<answer>42</answer>"
+    bd = score_reasoning_completion(text, "42")
+    assert bd.outcome_reward == 1.0
+    assert bd.repetition_penalty > 0.0
+    # Correct answer still strictly beats a short wrong guess
+    short_wrong = score_reasoning_completion("<think>Guess.</think>\n<answer>99</answer>", "42")
+    assert bd.total_reward > short_wrong.total_reward
+
+
+def test_verified_tir_dataset_generates_bilingual_math_word_problems():
+    examples = build_verified_tir_dataset(num_math=24, num_code=4, num_factual=4, general_ratio=0.15, seed=42)
+    math_en = [ex.prompt for ex in examples if ex.category == "math_tir" and ex.language == "en"]
+    math_es = [ex.prompt for ex in examples if ex.category == "math_tir" and ex.language == "es"]
+    assert any("batch job processes" in p for p in math_en)
+    assert any("Un proceso gestiona" in p for p in math_es)
+
+
+def test_score_reasoning_completion_does_not_match_tool_call_args_as_answer():
+    only_tool = '<think>Use calc.</think>\n<tool_call>{"tool":"calc","args":{"expr":"42 + 1"}}</tool_call>'
+    bd = score_reasoning_completion(only_tool, "42")
+    assert bd.outcome_reward == 0.0
+    assert bd.valid_tool_json is True
+
+
+def test_kaggle_notebooks_gate_intermediate_cleanup_on_export_success():
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for nb_name in (
+        "fase5_bitnet_2b_think_tir_kaggle.ipynb",
+        "fase5_bitnet_2b_think_tir_tpu_v5e8_kaggle.ipynb",
+    ):
+        nb = json.loads((root / "notebooks" / nb_name).read_text(encoding="utf-8"))
+        export_cells = [
+            "".join(c.get("source", []))
+            for c in nb["cells"]
+            if c.get("cell_type") == "code" and "import_bitnet.py" in "".join(c.get("source", []))
+        ]
+        assert len(export_cells) == 1
+        src = export_cells[0]
+        assert "!rm -rf" not in src
+        assert "&& test -s" in src
+        assert "&& rm -rf" in src
+
+

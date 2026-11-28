@@ -36,6 +36,7 @@ from trace.eval.bench_4domains import (
     build_extended_suite,
     evaluate_4domains,
 )
+from trace.reasoning.dataset import DEFAULT_SYSTEM_PROMPT
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -163,7 +164,7 @@ class NativeTraceLMBackend:
 
     def _encode_chat(self, prompt: str) -> list[int]:
         out_arr = (ctypes.c_int32 * (self.max_ctx - 64))()
-        sys_msg = b"Eres un asistente tecnico conciso y preciso. Responde solo lo solicitado."
+        sys_msg = DEFAULT_SYSTEM_PROMPT.encode("utf-8")
         n = int(
             self.tok.trace_tokenizer_format_chat_llama3(
                 self.tok_buf,

@@ -775,6 +775,8 @@ def run_hf_2b_training(
                     ref_logits = model(input_ids=gen_batch).logits
                     log_ref = gather_token_logprobs(ref_logits, gen_batch)
                     del ref_logits
+                if is_xla and xm is not None:
+                    xm.mark_step()
                 old_logits = model(input_ids=gen_batch).logits
                 log_old = gather_token_logprobs(old_logits, gen_batch)
                 del old_logits
